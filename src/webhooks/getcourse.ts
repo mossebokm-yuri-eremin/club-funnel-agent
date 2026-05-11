@@ -1,0 +1,179 @@
+import crypto from 'node:crypto';
+import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
+import { log } from '../observability/logger.js';
+
+// Заголовок подписи: SPEC §9.4 → 'x-gc-signature' (lower-case в fastify).
+export const GC_SIGNATURE_HEADER = 'x-gc-signature';
+// TTL для ключей идемпотентности: 7 дней. GetCourse может ретраить webhook
+// несколько раз; 7 суток — с запасом перекрывает SLA и pull-reconcile.
+// TODO confirm with Yuri: уточнить SLA ретраев GC.
+export const DEFAULT_IDEMPOTENCY_TTL_SEC = 60 * 60 * 24 * 7;
+
+export interface IdempotencyStore {
+  /** Возвращает true, если ключ был установлен впервые; false — если уже существовал. */
+  acquire(key: string, ttlSeconds: number): Promise<boolean>;
+}
+
+// Минимальный интерфейс ioredis, который нам нужен. Не тянем тип Redis из ioredis,
+// чтобы webhook оставался тестируемым без реального клиента.
+export interface RedisLike {
+  set(
+    key: string,
+    value: string,
+    nxMode: 'NX',
+    ttlMode: 'EX',
+    ttlSeconds: number,
+  ): Promise<'OK' | null>;
+}
+
+export function redisIdempotencyStore(redis: RedisLike): IdempotencyStore {
+  return {
+    async acquire(key, ttlSeconds) {
+      const r = await redis.set(key, '1', 'NX', 'EX', ttlSeconds);
+      return r === 'OK';
+    },
+  };
+}
+
+export interface GetCourseDealPayload {
+  action?: string;
+  deal?: {
+    id?: string | number;
+    status?: string;
+    user?: { email?: string; phone?: string; first_name?: string };
+    offer_id?: string | number;
+    amount?: string | number;
+    currency?: string;
+    utm?: Record<string, string>;
+    paid_at?: string;
+  };
+  timestamp?: number;
+  [k: string]: unknown;
+}
+
+export interface ProcessedResult {
+  /** true → выполнили реальную обработку, false → дубликат, пропустили. */
+  processed: boolean;
+  eventId: string;
+}
+
+export interface RegisterGetCourseWebhookOptions {
+  secret: string;
+  idempotency: IdempotencyStore;
+  /** Бизнес-обработчик. Вызывается ТОЛЬКО после успешного HMAC и первой acquire. */
+  onPayload?: (payload: GetCourseDealPayload, ctx: { eventId: string; raw: Buffer }) => Promise<void> | void;
+  /** Префикс ключей в redis. По умолчанию 'idemp:gc-webhook'. */
+  idempotencyKeyPrefix?: string;
+  idempotencyTtlSec?: number;
+  route?: string;
+}
+
+// HMAC-SHA256 hex, как описано в SPEC §6.2 и §9.4.
+export function verifyHmac(rawBody: Buffer, signatureHeader: string | undefined, secret: string): boolean {
+  if (!signatureHeader) return false;
+  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  // Сравниваем lower-case; GC присылает hex, регистр не критичен.
+  const got = signatureHeader.trim().toLowerCase();
+  if (expected.length !== got.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(got, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+export function eventIdFromPayload(payload: GetCourseDealPayload): string {
+  // Идемпотентность по бизнес-ключу: action + deal.id + timestamp.
+  // Если deal.id отсутствует — fallback на хеш всего тела (стабильность важнее красоты).
+  const action = payload.action ?? 'unknown';
+  const dealId = payload.deal?.id !== undefined ? String(payload.deal.id) : null;
+  const ts = payload.timestamp !== undefined ? String(payload.timestamp) : '0';
+  if (dealId) return `${action}:${dealId}:${ts}`;
+  const h = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
+  return `${action}:noid:${h}`;
+}
+
+function getRawBody(req: FastifyRequest): Buffer | null {
+  const raw = (req as FastifyRequest & { rawBody?: unknown }).rawBody;
+  if (Buffer.isBuffer(raw)) return raw;
+  return null;
+}
+
+// Регистрирует content-type parser для application/json, сохраняющий raw body.
+// Должен вызываться один раз на инстансе fastify (idempotent — повторный вызов
+// не падает, мы ловим исключение типа FST_ERR_CTP_ALREADY_PRESENT).
+export function ensureRawBodyParser(app: FastifyInstance): void {
+  try {
+    app.addContentTypeParser(
+      'application/json',
+      { parseAs: 'buffer' },
+      (req, body, done) => {
+        (req as FastifyRequest & { rawBody?: Buffer }).rawBody = body as Buffer;
+        try {
+          const parsed = (body as Buffer).length === 0 ? {} : JSON.parse((body as Buffer).toString('utf8'));
+          done(null, parsed);
+        } catch (err) {
+          done(err as Error, undefined);
+        }
+      },
+    );
+  } catch (err: unknown) {
+    const code = (err as { code?: string } | null)?.code;
+    if (code !== 'FST_ERR_CTP_ALREADY_PRESENT') throw err;
+  }
+}
+
+export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhookOptions> = async (
+  app,
+  opts,
+) => {
+  const route = opts.route ?? '/webhook/getcourse';
+  const keyPrefix = opts.idempotencyKeyPrefix ?? 'idemp:gc-webhook';
+  const ttl = opts.idempotencyTtlSec ?? DEFAULT_IDEMPOTENCY_TTL_SEC;
+
+  ensureRawBodyParser(app);
+
+  app.post(route, async (req, reply) => {
+    const raw = getRawBody(req);
+    if (!raw) {
+      log.warn({ ip: req.ip }, 'gc-webhook: missing raw body');
+      return reply.code(400).send({ error: 'missing_body' });
+    }
+
+    const sig = req.headers[GC_SIGNATURE_HEADER];
+    const sigStr = Array.isArray(sig) ? sig[0] : sig;
+
+    if (!verifyHmac(raw, sigStr, opts.secret)) {
+      log.warn({ ip: req.ip, hasHeader: Boolean(sigStr) }, 'gc-webhook: invalid HMAC');
+      return reply.code(401).send({ error: 'invalid_signature' });
+    }
+
+    const payload = (req.body ?? {}) as GetCourseDealPayload;
+    const eventId = eventIdFromPayload(payload);
+    const key = `${keyPrefix}:${eventId}`;
+
+    const acquired = await opts.idempotency.acquire(key, ttl);
+    if (!acquired) {
+      log.info({ eventId }, 'gc-webhook: duplicate, skipping handler');
+      const result: ProcessedResult = { processed: false, eventId };
+      return reply.code(200).send(result);
+    }
+
+    if (opts.onPayload) {
+      try {
+        await opts.onPayload(payload, { eventId, raw });
+      } catch (err) {
+        // Намеренно не отдаём 5xx наружу: payload уже валиден (HMAC ok), а GC
+        // ретраит — это создаст шум. Кладём в DLQ через лог, разберём отдельно.
+        // TODO confirm with Yuri: либо вернуть 500 для авто-ретрая GC,
+        // либо явный async DLQ (BullMQ webhook_dlq из SPEC §3.5).
+        log.error({ err, eventId }, 'gc-webhook: handler failed; logged for DLQ');
+      }
+    }
+
+    const result: ProcessedResult = { processed: true, eventId };
+    return reply.code(200).send(result);
+  });
+};
+
+export default getCourseWebhookPlugin;
