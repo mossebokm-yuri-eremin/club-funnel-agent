@@ -13,6 +13,7 @@ export const QUEUE_NAMES = {
   AUDIO: 'audio_queue',
   REFERENCE_DL: 'reference_dl_queue',
   IDEA: 'idea_queue',
+  CONTENT: 'content_queue',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -52,6 +53,13 @@ export interface IdeaJobData {
   idea_id: string;
 }
 
+export interface ContentJobData {
+  idea_id: string;
+  /** Уже выбранная стратегия — если null, content-worker сам её посчитает. */
+  strategy?: 'A' | 'B' | 'C';
+  forced_bonus_id?: string;
+}
+
 // --- Дефолтные опции ---
 
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
@@ -78,6 +86,7 @@ function buildQueue<T>(name: QueueName, jobOptions: JobsOptions = DEFAULT_JOB_OP
 let _audio: Queue<SttJobData> | null = null;
 let _refDl: Queue<ReferenceDetectJobData> | null = null;
 let _idea: Queue<IdeaJobData> | null = null;
+let _content: Queue<ContentJobData> | null = null;
 
 export function audioQueue(): Queue<SttJobData> {
   if (!_audio) _audio = buildQueue<SttJobData>(QUEUE_NAMES.AUDIO);
@@ -99,13 +108,20 @@ export function ideaQueue(): Queue<IdeaJobData> {
   return _idea;
 }
 
+export function contentQueue(): Queue<ContentJobData> {
+  if (!_content) _content = buildQueue<ContentJobData>(QUEUE_NAMES.CONTENT);
+  return _content;
+}
+
 export async function closeAllQueues(): Promise<void> {
   const all: Queue[] = [];
   if (_audio) all.push(_audio);
   if (_refDl) all.push(_refDl);
   if (_idea) all.push(_idea);
+  if (_content) all.push(_content);
   await Promise.allSettled(all.map((q) => q.close()));
   _audio = null;
   _refDl = null;
   _idea = null;
+  _content = null;
 }
