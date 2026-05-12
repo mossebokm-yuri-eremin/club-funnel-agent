@@ -54,7 +54,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \
   build-essential curl ca-certificates git ffmpeg fonts-inter \
-  python3 python3-pip ufw fail2ban htop jq unzip
+  python3 python3-pip ufw fail2ban htop jq unzip \
+  libvips libvips-dev
 
 step "2/14 Node 22 LTS + pnpm + pm2"
 if ! command -v node >/dev/null || ! node -v | grep -q '^v22'; then

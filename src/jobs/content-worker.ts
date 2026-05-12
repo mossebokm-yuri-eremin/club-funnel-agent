@@ -10,7 +10,7 @@ import { Worker, type Job } from 'bullmq';
 import type { Pool } from 'pg';
 import { createRedisClient } from '../redis.js';
 import { log } from '../observability/logger.js';
-import { QUEUE_NAMES, type ContentJobData } from './queues.js';
+import { QUEUE_NAMES, type ContentJobData, visualQueue } from './queues.js';
 import { chooseStrategy, type BonusCandidate, type Strategy } from '../services/strategy-chooser.js';
 import { generateContentPackage } from '../services/content-gen.js';
 // generateLongread / config будут подключены в Phase 4 (рендер PDF + ChatPlace доставка).
@@ -204,6 +204,21 @@ async function process(
   );
 
   await deps.pool.query(`UPDATE ideas SET status = 'content_ready' WHERE id = $1`, [idea.id]);
+
+  // Enqueue визуализации (SPEC §2.7 AC-19..21). Если voice-validator не прошёл
+  // (escalated), карусели всё равно нужно отрендерить — Юрий может одобрить с правками,
+  // картинки актуальны для текста, который он утвердит вручную.
+  try {
+    await visualQueue().add('render', {
+      idea_id: idea.id,
+      content_package_id: pkg.contentPackageId,
+    });
+  } catch (err) {
+    log.warn(
+      { ideaId: idea.id, err: (err as Error).message },
+      'content-worker: failed to enqueue visual (continuing)',
+    );
+  }
 
   const result: ContentWorkerResult = {
     status: pkg.escalated ? 'escalated' : 'ok',

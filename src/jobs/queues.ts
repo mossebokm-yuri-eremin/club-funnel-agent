@@ -14,6 +14,7 @@ export const QUEUE_NAMES = {
   REFERENCE_DL: 'reference_dl_queue',
   IDEA: 'idea_queue',
   CONTENT: 'content_queue',
+  VISUAL: 'visual_queue',
   FUNNEL: 'funnel_queue',
   GETCOURSE_PULL: 'getcourse_pull_queue',
 } as const;
@@ -85,6 +86,15 @@ export interface GetCoursePullJobData {
   order_id?: string;
 }
 
+export interface VisualJobData {
+  /** Идея, под которую рендерим карусель. */
+  idea_id: string;
+  /** ID content_package — обновим в нём поле assets с URL'ами. */
+  content_package_id: string;
+  /** Подсказка стиля от Юрия (опционально). */
+  style_hint?: string;
+}
+
 // --- Дефолтные опции ---
 
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
@@ -112,6 +122,7 @@ let _audio: Queue<SttJobData> | null = null;
 let _refDl: Queue<ReferenceDetectJobData> | null = null;
 let _idea: Queue<IdeaJobData> | null = null;
 let _content: Queue<ContentJobData> | null = null;
+let _visual: Queue<VisualJobData> | null = null;
 let _funnel: Queue<FunnelJobData> | null = null;
 let _gcPull: Queue<GetCoursePullJobData> | null = null;
 
@@ -138,6 +149,18 @@ export function ideaQueue(): Queue<IdeaJobData> {
 export function contentQueue(): Queue<ContentJobData> {
   if (!_content) _content = buildQueue<ContentJobData>(QUEUE_NAMES.CONTENT);
   return _content;
+}
+
+export function visualQueue(): Queue<VisualJobData> {
+  if (!_visual) {
+    _visual = buildQueue<VisualJobData>(QUEUE_NAMES.VISUAL, {
+      ...DEFAULT_JOB_OPTIONS,
+      // Nano Banana бывает нестабильным — больше попыток + длиннее backoff.
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 10_000 },
+    });
+  }
+  return _visual;
 }
 
 export function funnelQueue(): Queue<FunnelJobData> {
@@ -168,6 +191,7 @@ export async function closeAllQueues(): Promise<void> {
   if (_refDl) all.push(_refDl);
   if (_idea) all.push(_idea);
   if (_content) all.push(_content);
+  if (_visual) all.push(_visual);
   if (_funnel) all.push(_funnel);
   if (_gcPull) all.push(_gcPull);
   await Promise.allSettled(all.map((q) => q.close()));
@@ -175,6 +199,7 @@ export async function closeAllQueues(): Promise<void> {
   _refDl = null;
   _idea = null;
   _content = null;
+  _visual = null;
   _funnel = null;
   _gcPull = null;
 }

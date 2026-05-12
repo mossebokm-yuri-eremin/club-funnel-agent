@@ -10,6 +10,7 @@ import { createSttWorker } from './jobs/stt-worker.js';
 import { createReferenceDetectWorker } from './jobs/reference-detect-worker.js';
 import { createIdeaWorker } from './jobs/idea-worker.js';
 import { createContentWorker } from './jobs/content-worker.js';
+import { createCarouselWorker } from './jobs/carousel-worker.js';
 import { createFunnelWorker } from './jobs/funnel-worker.js';
 import { createGetCoursePullWorker } from './jobs/getcourse-pull-worker.js';
 import type { Bot } from 'grammy';
@@ -54,6 +55,7 @@ function buildBotWorkers(bot: Bot): Shutdownable[] {
     createReferenceDetectWorker({ pool }),
     createIdeaWorker({ pool }),
     createContentWorker({ pool }),
+    createCarouselWorker({ pool }),
     createFunnelWorker({ pool }),
     createGetCoursePullWorker({ pool }),
   ];
