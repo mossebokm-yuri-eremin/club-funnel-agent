@@ -14,6 +14,8 @@ export const QUEUE_NAMES = {
   REFERENCE_DL: 'reference_dl_queue',
   IDEA: 'idea_queue',
   CONTENT: 'content_queue',
+  FUNNEL: 'funnel_queue',
+  GETCOURSE_PULL: 'getcourse_pull_queue',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -60,6 +62,29 @@ export interface ContentJobData {
   forced_bonus_id?: string;
 }
 
+export type FunnelJobData =
+  | {
+      kind: 'longread_delivery';
+      subscriber_id: string;
+      bonus_id: string;
+      funnel_id?: string;
+      code_word?: string;
+      chatplace_subscriber_id?: string;
+    }
+  | {
+      kind: 'club_upsell';
+      subscriber_id: string;
+      funnel_id?: string;
+      code_word?: string;
+      chatplace_subscriber_id?: string;
+    };
+
+export interface GetCoursePullJobData {
+  /** Тип pull-а: 'subscribers' тянет общий список, 'order' проверяет одиночный orderId. */
+  kind: 'subscribers' | 'order';
+  order_id?: string;
+}
+
 // --- Дефолтные опции ---
 
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
@@ -87,6 +112,8 @@ let _audio: Queue<SttJobData> | null = null;
 let _refDl: Queue<ReferenceDetectJobData> | null = null;
 let _idea: Queue<IdeaJobData> | null = null;
 let _content: Queue<ContentJobData> | null = null;
+let _funnel: Queue<FunnelJobData> | null = null;
+let _gcPull: Queue<GetCoursePullJobData> | null = null;
 
 export function audioQueue(): Queue<SttJobData> {
   if (!_audio) _audio = buildQueue<SttJobData>(QUEUE_NAMES.AUDIO);
@@ -113,15 +140,41 @@ export function contentQueue(): Queue<ContentJobData> {
   return _content;
 }
 
+export function funnelQueue(): Queue<FunnelJobData> {
+  if (!_funnel) {
+    _funnel = buildQueue<FunnelJobData>(QUEUE_NAMES.FUNNEL, {
+      ...DEFAULT_JOB_OPTIONS,
+      attempts: 5,
+    });
+  }
+  return _funnel;
+}
+
+export function getCoursePullQueue(): Queue<GetCoursePullJobData> {
+  if (!_gcPull) {
+    _gcPull = buildQueue<GetCoursePullJobData>(QUEUE_NAMES.GETCOURSE_PULL, {
+      ...DEFAULT_JOB_OPTIONS,
+      attempts: 3,
+      // Hourly pull — лёгкие задачи, чистим быстрее.
+      removeOnComplete: { age: 24 * 3600, count: 200 },
+    });
+  }
+  return _gcPull;
+}
+
 export async function closeAllQueues(): Promise<void> {
   const all: Queue[] = [];
   if (_audio) all.push(_audio);
   if (_refDl) all.push(_refDl);
   if (_idea) all.push(_idea);
   if (_content) all.push(_content);
+  if (_funnel) all.push(_funnel);
+  if (_gcPull) all.push(_gcPull);
   await Promise.allSettled(all.map((q) => q.close()));
   _audio = null;
   _refDl = null;
   _idea = null;
   _content = null;
+  _funnel = null;
+  _gcPull = null;
 }

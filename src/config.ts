@@ -83,6 +83,8 @@ const ConfigSchema = z.object({
   GC_WEBHOOK_SECRET: z.string().min(1, 'GC_WEBHOOK_SECRET required for HMAC validation'),
   GC_BASE_OFFER_ID: z.string().optional(),
   GC_BASE_PRICE_KOPECKS: intNum.default(500000),
+  GC_API_BASE: z.string().url().default('https://account.getcourse.ru/pl/api'),
+  GC_PULL_PAGE_SIZE: intNum.default(100),
 
   // --- Cloudinary ---
   CLOUDINARY_CLOUD_NAME: z.string().optional(),

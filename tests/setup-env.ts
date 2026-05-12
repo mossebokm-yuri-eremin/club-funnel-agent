@@ -9,6 +9,8 @@ const stubEnv: Record<string, string> = {
   TELEGRAM_BOT_TOKEN: 'test-telegram-token',
   YE_TG_USER_ID: '0',
   GC_WEBHOOK_SECRET: 'test-secret-1234567890',
+  GC_BASE_OFFER_ID: 'test-club-offer',
+  GC_ACCOUNT: 'mossebo-test',
 };
 
 for (const [k, v] of Object.entries(stubEnv)) {
