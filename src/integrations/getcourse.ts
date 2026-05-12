@@ -62,11 +62,17 @@ export interface GcHttpResponse {
 
 export type GcFetch = (
   url: string,
-  init: { method: 'GET'; headers: Record<string, string> },
+  init: {
+    method: 'GET' | 'POST' | 'PUT';
+    headers: Record<string, string>;
+    body?: string;
+  },
 ) => Promise<GcHttpResponse>;
 
 const defaultFetch: GcFetch = async (url, init) => {
-  const res = await fetch(url, init);
+  const init2: RequestInit = { method: init.method, headers: init.headers };
+  if (init.body !== undefined) init2.body = init.body;
+  const res = await fetch(url, init2);
   const ct = res.headers.get('content-type') ?? '';
   const body: unknown = ct.includes('application/json') ? await res.json() : await res.text();
   return { status: res.status, body };
@@ -80,9 +86,33 @@ export interface GcClientOptions {
   maxAttempts?: number;
 }
 
+/** Параметры создания сделки в GetCourse (Phase 6 расширение).
+ *  Реальные имена полей варьируются между установками GC; здесь — минимум,
+ *  который оператор может приземлить через UTM/тег на оффер «Реализация». */
+export interface CreateDealInput {
+  /** email подписчика (обязателен для GC). */
+  email: string;
+  /** offer_id из GC (для клуба — GC_BASE_OFFER_ID). */
+  offer_id: string;
+  /** Доп. теги, например UTM воронки. */
+  tags?: string[];
+  /** Сумма в копейках (для валидации в логах). */
+  amount_kopecks?: number;
+}
+
+const CreateDealResponseSchema = z.object({
+  success: z.boolean().optional(),
+  deal_id: z.coerce.string().optional(),
+  order_id: z.coerce.string().optional(),
+  status: z.string().optional(),
+});
+export type CreateDealResponse = z.infer<typeof CreateDealResponseSchema>;
+
 export interface GcClient {
   hourlyPullSubscribers(opts?: { groupContains?: string }): Promise<GcSubscriber[]>;
   getOrderStatus(orderId: string): Promise<GcOrder | null>;
+  /** Создать сделку (deal) для подписчика на конкретный оффер. */
+  createDeal(input: CreateDealInput): Promise<CreateDealResponse>;
 }
 
 const RETRIABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -97,21 +127,31 @@ function buildHeaders(apiKey: string | undefined): Record<string, string> {
   return h;
 }
 
-async function get<T>(
+async function request<T>(
   opts: Required<Pick<GcClientOptions, 'apiBase' | 'maxAttempts'>> & {
     apiKey: string | undefined;
     fetchImpl: GcFetch;
     path: string;
+    method?: 'GET' | 'POST' | 'PUT';
+    body?: unknown;
     tag: string;
     schema: z.ZodType<T>;
   },
 ): Promise<T> {
   const url = `${opts.apiBase.replace(/\/$/, '')}${opts.path}`;
+  const method = opts.method ?? 'GET';
   let lastErr: Error | null = null;
 
   for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
     try {
-      const res = await opts.fetchImpl(url, { method: 'GET', headers: buildHeaders(opts.apiKey) });
+      const headers = buildHeaders(opts.apiKey);
+      if (opts.body !== undefined) headers['content-type'] = 'application/json';
+      const init: { method: 'GET' | 'POST' | 'PUT'; headers: Record<string, string>; body?: string } = {
+        method,
+        headers,
+      };
+      if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
+      const res = await opts.fetchImpl(url, init);
 
       if (res.status >= 200 && res.status < 300) {
         const parsed = opts.schema.safeParse(res.body);
@@ -166,7 +206,7 @@ export function createGetCourseClient(opts: GcClientOptions = {}): GcClient {
         const qs = new URLSearchParams({ limit: String(pageSize) });
         if (cursor) qs.set('page', cursor);
         if (callOpts?.groupContains) qs.set('group', callOpts.groupContains);
-        const r = await get({
+        const r = await request({
           apiBase,
           apiKey,
           fetchImpl,
@@ -197,7 +237,7 @@ export function createGetCourseClient(opts: GcClientOptions = {}): GcClient {
         log.info({ orderId }, 'getcourse[dry-run]: getOrderStatus');
         return null;
       }
-      const r = await get({
+      const r = await request({
         apiBase,
         apiKey,
         fetchImpl,
@@ -207,6 +247,31 @@ export function createGetCourseClient(opts: GcClientOptions = {}): GcClient {
         schema: OrderResponseSchema,
       });
       return r.order;
+    },
+
+    async createDeal(input) {
+      if (dryRun) {
+        log.info(
+          { email: input.email, offer_id: input.offer_id, amount_kopecks: input.amount_kopecks },
+          'getcourse[dry-run]: createDeal',
+        );
+        return { success: true, deal_id: `dryrun-${Date.now()}` };
+      }
+      return request({
+        apiBase,
+        apiKey,
+        fetchImpl,
+        maxAttempts,
+        path: '/deals',
+        method: 'POST',
+        body: {
+          email: input.email,
+          offer_id: input.offer_id,
+          ...(input.tags ? { tags: input.tags } : {}),
+        },
+        tag: 'createDeal',
+        schema: CreateDealResponseSchema,
+      });
     },
   };
 }

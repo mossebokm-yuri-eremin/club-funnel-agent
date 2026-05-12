@@ -11,6 +11,9 @@ const stubEnv: Record<string, string> = {
   GC_WEBHOOK_SECRET: 'test-secret-1234567890',
   GC_BASE_OFFER_ID: 'test-club-offer',
   GC_ACCOUNT: 'mossebo-test',
+  // Phase 6 (Phase 5 уже использует GEMINI_API_KEY для Nano Banana — также покрыто).
+  GEMINI_API_KEY: 'test-gemini-key',
+  RAPIDAPI_KEY: 'test-rapidapi-key',
 };
 
 for (const [k, v] of Object.entries(stubEnv)) {

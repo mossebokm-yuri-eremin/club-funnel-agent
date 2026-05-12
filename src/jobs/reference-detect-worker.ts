@@ -6,7 +6,7 @@
 import { Worker, type Job } from 'bullmq';
 import { createRedisClient } from '../redis.js';
 import { log } from '../observability/logger.js';
-import { QUEUE_NAMES, type ReferenceDetectJobData } from './queues.js';
+import { QUEUE_NAMES, type ReferenceDetectJobData, referenceProcessQueue } from './queues.js';
 import type { Pool } from 'pg';
 
 export interface ReferenceDetectWorkerDeps {
@@ -84,5 +84,23 @@ async function process(
     },
     'reference-detect-worker: reference saved',
   );
+
+  // Enqueue Phase 6 пайплайна (download + Gemini Video analysis).
+  // Skip если у нас нет URL для скачивания (TG video_file без IG-ссылки — manual flow).
+  if (data.detection.mediaUrl) {
+    try {
+      await referenceProcessQueue().add('process', {
+        reference_id: referenceId,
+        source_url: data.detection.mediaUrl,
+        source_type: sourceType,
+      });
+    } catch (err) {
+      log.warn(
+        { referenceId, err: (err as Error).message },
+        'reference-detect-worker: failed to enqueue process (continuing)',
+      );
+    }
+  }
+
   return { status: 'ok', referenceId };
 }

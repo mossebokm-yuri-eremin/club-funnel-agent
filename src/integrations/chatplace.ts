@@ -54,6 +54,43 @@ const GetSubscriberResponseSchema = z.object({
   subscriber: ChatPlaceSubscriberSchema.nullable(),
 });
 
+// --- Scenario CRUD (Phase 6 расширение) -------------------------------------
+
+/** Описание триггеров и шагов сценария. Точная схема ChatPlace отсутствует
+ *  публично — оставляем гибким `unknown`, валидируем только верхний уровень. */
+export interface ChatPlaceScenarioDefinition {
+  /** Уникальный код сценария: например `realiz_NNNN`. */
+  code: string;
+  /** Человекочитаемое название (показывается в админке ChatPlace). */
+  name: string;
+  /** Триггеры запуска (комментарий с кодовым словом, кнопка и т.д.). */
+  triggers: Array<Record<string, unknown>>;
+  /** Шаги сценария (DM, тег, переадресация). */
+  steps: Array<Record<string, unknown>>;
+  /** Активен ли сценарий по умолчанию. */
+  enabled?: boolean;
+}
+
+const ChatPlaceScenarioSchema = z.object({
+  id: z.string(),
+  code: z.string(),
+  name: z.string(),
+  enabled: z.boolean().optional(),
+});
+export type ChatPlaceScenario = z.infer<typeof ChatPlaceScenarioSchema>;
+
+const CreateScenarioResponseSchema = z.object({
+  scenario: ChatPlaceScenarioSchema,
+});
+
+const ListScenariosResponseSchema = z.object({
+  scenarios: z.array(ChatPlaceScenarioSchema),
+});
+
+const DeleteScenarioResponseSchema = z.object({
+  status: z.enum(['deleted', 'not_found']),
+});
+
 // --- HTTP-клиент -------------------------------------------------------------
 
 export interface ChatPlaceHttpResponse {
@@ -63,7 +100,7 @@ export interface ChatPlaceHttpResponse {
 
 export type ChatPlaceFetch = (
   url: string,
-  init: { method: 'GET' | 'POST'; headers: Record<string, string>; body?: string },
+  init: { method: 'GET' | 'POST' | 'PUT' | 'DELETE'; headers: Record<string, string>; body?: string },
 ) => Promise<ChatPlaceHttpResponse>;
 
 const defaultFetch: ChatPlaceFetch = async (url, init) => {
@@ -89,6 +126,15 @@ export interface ChatPlaceClient {
   sendDirectMessage(subscriberId: string, text: string): Promise<SendDirectMessageResponse>;
   triggerScenario(subscriberId: string, scenarioCode: string): Promise<TriggerScenarioResponse>;
   getSubscriberByIgUsername(username: string): Promise<ChatPlaceSubscriber | null>;
+  // --- Phase 6: программное управление сценариями (воронками) ---
+  /** Создать сценарий. Возвращает созданный объект. */
+  createScenario(def: ChatPlaceScenarioDefinition): Promise<ChatPlaceScenario>;
+  /** Обновить сценарий по code. */
+  updateScenario(code: string, def: ChatPlaceScenarioDefinition): Promise<ChatPlaceScenario>;
+  /** Список сценариев — для аудита и cleanup. */
+  listScenarios(): Promise<ChatPlaceScenario[]>;
+  /** Удалить сценарий по code. */
+  deleteScenario(code: string): Promise<{ status: 'deleted' | 'not_found' }>;
 }
 
 const RETRIABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -112,7 +158,7 @@ async function request<T>(
     apiKey: string | undefined;
     fetchImpl: ChatPlaceFetch;
     path: string;
-    method: 'GET' | 'POST';
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE';
     body?: unknown;
     schema: z.ZodType<T>;
     tag: string;
@@ -123,7 +169,11 @@ async function request<T>(
 
   for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
     try {
-      const init: { method: 'GET' | 'POST'; headers: Record<string, string>; body?: string } = {
+      const init: {
+        method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+        headers: Record<string, string>;
+        body?: string;
+      } = {
         method: opts.method,
         headers: buildHeaders(opts.apiKey),
       };
@@ -239,6 +289,79 @@ export function createChatPlaceClient(opts: ChatPlaceClientOptions = {}): ChatPl
         tag: 'getSubscriberByIgUsername',
       });
       return r.subscriber;
+    },
+
+    async createScenario(def) {
+      if (dryRun) {
+        log.info({ code: def.code, name: def.name }, 'chatplace[dry-run]: createScenario');
+        return { id: `dryrun-${def.code}`, code: def.code, name: def.name, enabled: def.enabled };
+      }
+      const r = await request({
+        apiBase,
+        apiKey,
+        fetchImpl,
+        maxAttempts,
+        path: '/scenarios',
+        method: 'POST',
+        body: def,
+        schema: CreateScenarioResponseSchema,
+        tag: 'createScenario',
+      });
+      return r.scenario;
+    },
+
+    async updateScenario(code, def) {
+      if (dryRun) {
+        log.info({ code, name: def.name }, 'chatplace[dry-run]: updateScenario');
+        return { id: `dryrun-${code}`, code, name: def.name, enabled: def.enabled };
+      }
+      const r = await request({
+        apiBase,
+        apiKey,
+        fetchImpl,
+        maxAttempts,
+        path: `/scenarios/${encodeURIComponent(code)}`,
+        method: 'PUT',
+        body: def,
+        schema: CreateScenarioResponseSchema,
+        tag: 'updateScenario',
+      });
+      return r.scenario;
+    },
+
+    async listScenarios() {
+      if (dryRun) {
+        log.info({}, 'chatplace[dry-run]: listScenarios');
+        return [];
+      }
+      const r = await request({
+        apiBase,
+        apiKey,
+        fetchImpl,
+        maxAttempts,
+        path: '/scenarios',
+        method: 'GET',
+        schema: ListScenariosResponseSchema,
+        tag: 'listScenarios',
+      });
+      return r.scenarios;
+    },
+
+    async deleteScenario(code) {
+      if (dryRun) {
+        log.info({ code }, 'chatplace[dry-run]: deleteScenario');
+        return { status: 'deleted' };
+      }
+      return request({
+        apiBase,
+        apiKey,
+        fetchImpl,
+        maxAttempts,
+        path: `/scenarios/${encodeURIComponent(code)}`,
+        method: 'DELETE',
+        schema: DeleteScenarioResponseSchema,
+        tag: 'deleteScenario',
+      });
     },
   };
 }

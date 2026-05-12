@@ -12,6 +12,7 @@ import { log } from '../observability/logger.js';
 export const QUEUE_NAMES = {
   AUDIO: 'audio_queue',
   REFERENCE_DL: 'reference_dl_queue',
+  REFERENCE_PROCESS: 'reference_process_queue',
   IDEA: 'idea_queue',
   CONTENT: 'content_queue',
   VISUAL: 'visual_queue',
@@ -86,6 +87,15 @@ export interface GetCoursePullJobData {
   order_id?: string;
 }
 
+export interface ReferenceProcessJobData {
+  /** UUID строки в references_inbox (созданной reference-detect-worker). */
+  reference_id: string;
+  /** Публичный URL Instagram-поста / Reel'а. */
+  source_url: string;
+  /** Тип медиа — влияет на промпт Gemini. */
+  source_type: 'reel' | 'carousel' | 'post' | 'video_file';
+}
+
 export interface VisualJobData {
   /** Идея, под которую рендерим карусель. */
   idea_id: string;
@@ -120,6 +130,7 @@ function buildQueue<T>(name: QueueName, jobOptions: JobsOptions = DEFAULT_JOB_OP
 // которые не используют очереди, не открывали Redis-коннект.
 let _audio: Queue<SttJobData> | null = null;
 let _refDl: Queue<ReferenceDetectJobData> | null = null;
+let _refProc: Queue<ReferenceProcessJobData> | null = null;
 let _idea: Queue<IdeaJobData> | null = null;
 let _content: Queue<ContentJobData> | null = null;
 let _visual: Queue<VisualJobData> | null = null;
@@ -139,6 +150,17 @@ export function referenceDlQueue(): Queue<ReferenceDetectJobData> {
     });
   }
   return _refDl;
+}
+
+export function referenceProcessQueue(): Queue<ReferenceProcessJobData> {
+  if (!_refProc) {
+    _refProc = buildQueue<ReferenceProcessJobData>(QUEUE_NAMES.REFERENCE_PROCESS, {
+      ...DEFAULT_JOB_OPTIONS,
+      attempts: 5, // SPEC §3.5: 5× (yt-dlp→RapidAPI→manual)
+      backoff: { type: 'exponential', delay: 10_000 },
+    });
+  }
+  return _refProc;
 }
 
 export function ideaQueue(): Queue<IdeaJobData> {
@@ -189,6 +211,7 @@ export async function closeAllQueues(): Promise<void> {
   const all: Queue[] = [];
   if (_audio) all.push(_audio);
   if (_refDl) all.push(_refDl);
+  if (_refProc) all.push(_refProc);
   if (_idea) all.push(_idea);
   if (_content) all.push(_content);
   if (_visual) all.push(_visual);
@@ -197,6 +220,7 @@ export async function closeAllQueues(): Promise<void> {
   await Promise.allSettled(all.map((q) => q.close()));
   _audio = null;
   _refDl = null;
+  _refProc = null;
   _idea = null;
   _content = null;
   _visual = null;

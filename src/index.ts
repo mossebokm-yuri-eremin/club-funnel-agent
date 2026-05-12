@@ -8,6 +8,7 @@ import { bootstrapBot } from './bot/index.js';
 import { closeAllQueues, getCoursePullQueue } from './jobs/queues.js';
 import { createSttWorker } from './jobs/stt-worker.js';
 import { createReferenceDetectWorker } from './jobs/reference-detect-worker.js';
+import { createReferenceProcessWorker } from './jobs/reference-process-worker.js';
 import { createIdeaWorker } from './jobs/idea-worker.js';
 import { createContentWorker } from './jobs/content-worker.js';
 import { createCarouselWorker } from './jobs/carousel-worker.js';
@@ -53,6 +54,7 @@ function buildBotWorkers(bot: Bot): Shutdownable[] {
   const workers: Shutdownable[] = [
     createSttWorker({ pool, resolveTgFileUrl }),
     createReferenceDetectWorker({ pool }),
+    createReferenceProcessWorker({ pool }),
     createIdeaWorker({ pool }),
     createContentWorker({ pool }),
     createCarouselWorker({ pool }),
