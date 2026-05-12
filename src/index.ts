@@ -5,11 +5,14 @@ import { pool, closePool } from './db/client.js';
 import { redis, closeRedis } from './redis.js';
 import { getCourseWebhookPlugin, redisIdempotencyStore, type RedisLike } from './webhooks/getcourse.js';
 import { bootstrapBot } from './bot/index.js';
-import { closeAllQueues } from './jobs/queues.js';
+import { closeAllQueues, getCoursePullQueue } from './jobs/queues.js';
 import { createSttWorker } from './jobs/stt-worker.js';
 import { createReferenceDetectWorker } from './jobs/reference-detect-worker.js';
+import { createIdeaWorker } from './jobs/idea-worker.js';
+import { createContentWorker } from './jobs/content-worker.js';
+import { createFunnelWorker } from './jobs/funnel-worker.js';
+import { createGetCoursePullWorker } from './jobs/getcourse-pull-worker.js';
 import type { Bot } from 'grammy';
-import type { Worker } from 'bullmq';
 
 interface Shutdownable {
   close: () => Promise<unknown>;
@@ -44,11 +47,33 @@ function buildBotWorkers(bot: Bot): Shutdownable[] {
     return `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
   };
 
-  const workers: Worker[] = [
+  // Возвращаем как Shutdownable[] — массив гомогенен по close-сигнатуре, но
+  // объединение Worker<*,*> для 6 разных DataT даёт комбинаторный взрыв в tsc.
+  const workers: Shutdownable[] = [
     createSttWorker({ pool, resolveTgFileUrl }),
     createReferenceDetectWorker({ pool }),
+    createIdeaWorker({ pool }),
+    createContentWorker({ pool }),
+    createFunnelWorker({ pool }),
+    createGetCoursePullWorker({ pool }),
   ];
   return workers;
+}
+
+/** Ставит cron-задачу для GetCourse hourly pull (SPEC §2.11 AC-31).
+ *  Идемпотентно: BullMQ дедуплицирует repeatable job по паттерну. */
+async function scheduleGetCoursePullCron(): Promise<void> {
+  await getCoursePullQueue().add(
+    'subscribers',
+    { kind: 'subscribers' },
+    {
+      repeat: { pattern: config.CRON_GC_RECONCILE },
+      jobId: 'gc-pull-cron-subscribers',
+      removeOnComplete: { count: 50 },
+      removeOnFail: { count: 50 },
+    },
+  );
+  log.info({ pattern: config.CRON_GC_RECONCILE }, 'gc-pull: cron scheduled');
 }
 
 async function main(): Promise<void> {
@@ -88,6 +113,13 @@ async function main(): Promise<void> {
 
   // Workers — запускаются всегда (BullMQ переподключается к Redis сам).
   resources.workers = buildBotWorkers(bot);
+
+  // Cron: hourly pull GetCourse subscribers (SPEC §2.11 AC-31).
+  try {
+    await scheduleGetCoursePullCron();
+  } catch (err) {
+    log.warn({ err }, 'gc-pull cron: failed to schedule (continuing)');
+  }
 
   await app.listen({ host: config.APP_HOST, port: config.APP_PORT });
   log.info({ host: config.APP_HOST, port: config.APP_PORT }, 'http: listening');
