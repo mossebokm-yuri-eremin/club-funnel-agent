@@ -10,7 +10,7 @@
 // Implementation: используем undici.ProxyAgent — нативный диспатчер для встроенного
 // fetch в Node 22 (без лишней зависимости https-proxy-agent).
 
-import { ProxyAgent } from 'undici';
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
 import { config } from '../config.js';
 import { log } from '../observability/logger.js';
 
@@ -75,15 +75,16 @@ export async function geminiFetch(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  // undici fetch принимает dispatcher через RequestInit (Node 22+ native fetch).
-  const fetchOpts: RequestInit & { dispatcher?: ProxyAgent } = {
-    ...rest,
+  // Используем undici.fetch (не global) — он принимает dispatcher.
+  // Global fetch в Node 22 не пробрасывает dispatcher из RequestInit.
+  const fetchOpts: Parameters<typeof undiciFetch>[1] = {
+    ...(rest as Parameters<typeof undiciFetch>[1]),
     signal: controller.signal,
   };
-  if (agent) fetchOpts.dispatcher = agent;
+  if (agent) (fetchOpts as { dispatcher?: ProxyAgent }).dispatcher = agent;
 
   try {
-    return await fetch(url, fetchOpts);
+    return (await undiciFetch(url, fetchOpts)) as unknown as Response;
   } catch (err) {
     const msg = (err as Error).message ?? String(err);
     if (agent) {
