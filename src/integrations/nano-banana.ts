@@ -6,6 +6,7 @@
 // Идемпотентность не нужна (картинки уникальны), но retry с exponential backoff —
 // обязателен (Google AI API даёт нестабильные ошибки на peak).
 
+import sharp from 'sharp';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { log } from '../observability/logger.js';
@@ -71,11 +72,36 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function aspectDimensions(ar?: GenerateImageInput['aspectRatio']): { w: number; h: number } {
+  switch (ar) {
+    case '1:1':
+      return { w: 1080, h: 1080 };
+    case '16:9':
+      return { w: 1920, h: 1080 };
+    case '9:16':
+      return { w: 1080, h: 1920 };
+    case '4:5':
+    default:
+      return { w: 1080, h: 1350 };
+  }
+}
+
 /** Рендерит изображение через Gemini 3 Pro Image. */
 export async function generateImage(
   input: GenerateImageInput,
   deps: NanoBananaDeps = {},
 ): Promise<GenerateImageOutput> {
+  // Placeholder mode — для smoke/dev в локациях, где Gemini API заблокирован геолокацией.
+  if (config.NANO_BANANA_PLACEHOLDER_MODE) {
+    const dims = aspectDimensions(input.aspectRatio);
+    const png = await sharp({
+      create: { width: dims.w, height: dims.h, channels: 3, background: { r: 240, g: 240, b: 240 } },
+    })
+      .png()
+      .toBuffer();
+    log.info({ bytes: png.length, mode: 'placeholder' }, 'nano-banana: placeholder PNG returned');
+    return { png, mimeType: 'image/png' };
+  }
   const apiKey = config.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('nano-banana: GEMINI_API_KEY is not set');

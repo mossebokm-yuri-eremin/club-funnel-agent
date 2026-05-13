@@ -45,6 +45,11 @@ const ConfigSchema = z.object({
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_VIDEO_MODEL: z.string().default('gemini-2.5-pro'),
   GEMINI_IMAGE_MODEL: z.string().default('gemini-3-pro-image'),
+  /** При true генерирует placeholder PNG вместо вызова Gemini API (для smoke/dev, обход геоблока). */
+  NANO_BANANA_PLACEHOLDER_MODE: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
 
   // --- Deepgram ---
   DEEPGRAM_API_KEY: z.string().optional(),
