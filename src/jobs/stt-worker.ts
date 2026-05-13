@@ -102,7 +102,7 @@ async function process(
     const job = await ideaQueue().add(
       'build',
       { idea_id: ideaId },
-      { jobId: `idea:${ideaId}` },
+      { jobId: `idea-${ideaId}` },
     );
     log.info(
       { ideaId, jobId: job.id, queue: 'idea_queue' },
