@@ -7,7 +7,7 @@ import { Worker, type Job } from 'bullmq';
 import { createRedisClient } from '../redis.js';
 import { log } from '../observability/logger.js';
 import { transcribe, type SttResult } from '../services/stt.js';
-import { QUEUE_NAMES, type SttJobData } from './queues.js';
+import { QUEUE_NAMES, type SttJobData, ideaQueue } from './queues.js';
 import type { Pool } from 'pg';
 
 export interface SttWorkerDeps {
@@ -94,5 +94,17 @@ async function process(
     },
     'stt-worker: idea created from voice',
   );
+
+  // Enqueue idea-worker — он сделает structured idea-builder через Claude,
+  // потом сам поставит content-worker. Без этого пайплайн обрывается на STT.
+  try {
+    await ideaQueue().add('build', { idea_id: ideaId }, { jobId: `idea:${ideaId}` });
+  } catch (err) {
+    log.warn(
+      { ideaId, err: (err as Error).message },
+      'stt-worker: failed to enqueue idea (continuing)',
+    );
+  }
+
   return { status: 'ok', ideaId, text: sttResult.text };
 }
