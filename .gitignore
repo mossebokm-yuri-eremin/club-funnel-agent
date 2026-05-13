@@ -9,7 +9,7 @@ gdrive-sa.json
 
 # Логи и временные
 *.log
-setup-log.md
+# setup-log.md — деплой-журнал нужен в репо, чтобы команда видела историю.
 /var/log/
 /mnt/data/
 
