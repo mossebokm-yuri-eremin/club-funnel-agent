@@ -3,6 +3,7 @@
 
 import { Bot, webhookCallback } from 'grammy';
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import type { Pool } from 'pg';
 import { config } from '../config.js';
 import { log } from '../observability/logger.js';
 import { registerHandlers, type RegisterHandlersOptions } from './handlers.js';
@@ -11,6 +12,7 @@ export interface CreateBotOptions {
   token?: string;
   allowedUserId?: number;
   statusProvider?: RegisterHandlersOptions['statusProvider'];
+  pool?: Pool;
 }
 
 export function createBot(opts: CreateBotOptions = {}): Bot {
@@ -19,6 +21,7 @@ export function createBot(opts: CreateBotOptions = {}): Bot {
   const bot = new Bot(token);
   const handlerOpts: RegisterHandlersOptions = { allowedUserId };
   if (opts.statusProvider) handlerOpts.statusProvider = opts.statusProvider;
+  if (opts.pool) handlerOpts.pool = opts.pool;
   registerHandlers(bot, handlerOpts);
   bot.catch((err) => {
     log.error({ err: err.message, ctx: err.ctx?.update?.update_id }, 'bot: handler crashed');

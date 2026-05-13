@@ -9,6 +9,7 @@
 // что бот живой (AC-1: «Принял голосовое, расшифровываю»).
 
 import type { Bot, Context } from 'grammy';
+import type { Pool } from 'pg';
 import { log } from '../observability/logger.js';
 import { detectReference, type DetectableMessage } from '../services/reference-detector.js';
 import {
@@ -22,6 +23,8 @@ export interface RegisterHandlersOptions {
   allowedUserId: number;
   /** Для статусной команды — функция, возвращающая текущие счётчики. */
   statusProvider?: () => Promise<BotStatus> | BotStatus;
+  /** Для callback-handlers одобрения content_package. Если не задан — кнопки не реагируют. */
+  pool?: Pool;
 }
 
 export interface BotStatus {
@@ -82,6 +85,71 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
     } catch (err) {
       log.error({ err }, 'status: provider failed');
       await ctx.reply('Не смог собрать статус, посмотри логи.');
+    }
+  });
+
+  // ---- callback_query: одобрение content_package ----
+  // Кнопки в approval-notifier: cp:approve|reject|comment|cancel:<UUID>
+  bot.callbackQuery(/^cp:(approve|reject|comment|cancel):([0-9a-f-]{36})$/, async (ctx) => {
+    if (!isAuthorized(ctx, opts.allowedUserId)) {
+      log.warn({ from: ctx.from?.id }, 'unauthorized callback');
+      await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
+      return;
+    }
+    const m = ctx.match!;
+    const action = m[1] as 'approve' | 'reject' | 'comment' | 'cancel';
+    const pkgId = m[2] as string;
+    if (!opts.pool) {
+      await ctx.answerCallbackQuery({ text: 'pool not wired' });
+      return;
+    }
+    try {
+      if (action === 'approve' || action === 'reject' || action === 'cancel') {
+        const status = action === 'approve' ? 'approved' : 'rejected';
+        await opts.pool.query(
+          `UPDATE content_packages SET approval_status = $1, updated_at = NOW() WHERE id = $2`,
+          [status, pkgId],
+        );
+        const label =
+          action === 'approve'
+            ? '✅ Принято'
+            : action === 'reject'
+              ? '🔄 Переделать — пришли голосовое с правками'
+              : '❌ Отменено';
+        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await ctx.editMessageText(
+          `✅ content_package_id: \`${pkgId}\`\n\n${label}`,
+          { parse_mode: 'Markdown' },
+        ).catch(() => {});
+        await ctx.answerCallbackQuery({ text: label });
+        log.info({ pkgId, action, status }, 'approval-callback: status updated');
+      } else if (action === 'comment') {
+        await ctx.answerCallbackQuery({
+          text: 'Жду текстовый комментарий следующим сообщением — добавлю в пакет.',
+          show_alert: false,
+        });
+        // Сохраним «жду коммент» через note: добавим в БД маркер;
+        // полноценный conversation flow — позже (AC-22).
+        await opts.pool.query(
+          `UPDATE content_packages
+              SET validator_report = COALESCE(validator_report, '{}'::jsonb)
+                                     || jsonb_build_object('awaiting_comment_at', NOW()),
+                  updated_at = NOW()
+            WHERE id = $1`,
+          [pkgId],
+        );
+        await ctx.reply(
+          `💬 Жду твой комментарий следующим сообщением — приложу к пакету \`${pkgId.slice(0, 8)}\`.`,
+          { parse_mode: 'Markdown' },
+        );
+        log.info({ pkgId }, 'approval-callback: comment requested');
+      }
+    } catch (err) {
+      log.error(
+        { err: (err as Error).message, pkgId, action },
+        'approval-callback: handler failed',
+      );
+      await ctx.answerCallbackQuery({ text: 'Ошибка, посмотри логи.' });
     }
   });
 

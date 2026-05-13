@@ -10,6 +10,7 @@ import sharp from 'sharp';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { log } from '../observability/logger.js';
+import { geminiFetch, isGeminiProxyEnabled } from './gemini-fetch.js';
 
 export interface GenerateImageInput {
   /** Промпт для рендера. */
@@ -107,9 +108,13 @@ export async function generateImage(
     throw new Error('nano-banana: GEMINI_API_KEY is not set');
   }
   const model = config.GEMINI_IMAGE_MODEL;
-  const fetchFn = deps.fetchFn ?? fetch;
+  // По умолчанию geminiFetch — он сам выберет прокси из GEMINI_HTTPS_PROXY.
+  const fetchFn = deps.fetchFn ?? (geminiFetch as unknown as typeof fetch);
   const baseUrl = deps.baseUrl ?? DEFAULT_BASE_URL;
   const url = `${baseUrl}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  if (isGeminiProxyEnabled()) {
+    log.debug({}, 'nano-banana: using HTTPS proxy via GEMINI_HTTPS_PROXY');
+  }
 
   const body = {
     contents: [{ parts: [{ text: input.prompt }] }],

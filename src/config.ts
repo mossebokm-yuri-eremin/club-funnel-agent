@@ -43,6 +43,14 @@ const ConfigSchema = z.object({
 
   // --- Google AI ---
   GEMINI_API_KEY: z.string().optional(),
+  /**
+   * HTTPS-прокси для запросов к Gemini API (РФ-VPS → Netherlands прокси).
+   * Формат: `http://login:pass@host:port`. Пусто = без прокси (для локального dev).
+   * Используется ТОЛЬКО для generativelanguage.googleapis.com.
+   */
+  GEMINI_HTTPS_PROXY: z.string().optional(),
+  /** Bearer-токен для POST /test/image-gen (диагностический endpoint, не для прод). */
+  TEST_ENDPOINT_TOKEN: z.string().optional(),
   GEMINI_VIDEO_MODEL: z.string().default('gemini-2.5-pro'),
   GEMINI_IMAGE_MODEL: z.string().default('gemini-3-pro-image'),
   /** При true генерирует placeholder PNG вместо вызова Gemini API (для smoke/dev, обход геоблока). */
@@ -90,6 +98,11 @@ const ConfigSchema = z.object({
   GC_BASE_PRICE_KOPECKS: intNum.default(500000),
   GC_API_BASE: z.string().url().default('https://account.getcourse.ru/pl/api'),
   GC_PULL_PAGE_SIZE: intNum.default(100),
+  /** Полностью отключает getcourse_pull_queue воркер и cron (до получения корректных GC API кредов). */
+  GC_PULL_DISABLED: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
 
   // --- Cloudinary ---
   CLOUDINARY_CLOUD_NAME: z.string().optional(),

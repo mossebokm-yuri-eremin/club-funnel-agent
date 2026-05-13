@@ -32,6 +32,40 @@ async function buildHttpServer(): Promise<FastifyInstance> {
 
   app.get('/health', async () => ({ status: 'ok', ts: new Date().toISOString() }));
 
+  // Diagnostic: тест прокси и Nano Banana. Auth — Bearer token из TEST_ENDPOINT_TOKEN.
+  // Возвращает first-100-bytes от ответа Gemini, чтобы понять что приходит.
+  app.post('/test/image-gen', async (req, reply) => {
+    const token = config.TEST_ENDPOINT_TOKEN;
+    const auth = (req.headers['authorization'] ?? '') as string;
+    if (!token || auth !== `Bearer ${token}`) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    try {
+      const { generateImage } = await import('./integrations/nano-banana.js');
+      const { isGeminiProxyEnabled } = await import('./integrations/gemini-fetch.js');
+      const startedAt = Date.now();
+      const result = await generateImage({
+        prompt: 'A simple flat illustration of a notebook with a pen, soft pastel colors.',
+        aspectRatio: '4:5',
+      });
+      return {
+        ok: true,
+        proxyEnabled: isGeminiProxyEnabled(),
+        mimeType: result.mimeType,
+        bytes: result.png.length,
+        promptTokenCount: result.promptTokenCount ?? null,
+        elapsedMs: Date.now() - startedAt,
+      };
+    } catch (err) {
+      reply.code(502);
+      return {
+        ok: false,
+        error: (err as Error).message,
+      };
+    }
+  });
+
   // GetCourse webhook (HMAC) — регистрируем первым: он ставит rawBody parser.
   await app.register(getCourseWebhookPlugin, {
     secret: config.GC_WEBHOOK_SECRET,
@@ -59,8 +93,12 @@ function buildBotWorkers(bot: Bot): Shutdownable[] {
     createContentWorker({ pool }),
     createCarouselWorker({ pool }),
     createFunnelWorker({ pool }),
-    createGetCoursePullWorker({ pool }),
   ];
+  if (!config.GC_PULL_DISABLED) {
+    workers.push(createGetCoursePullWorker({ pool }));
+  } else {
+    log.info({}, 'gc-pull: worker disabled via GC_PULL_DISABLED=true');
+  }
   return workers;
 }
 
@@ -110,7 +148,7 @@ async function main(): Promise<void> {
   resources.app = app;
 
   // Bot — поднимаем после Fastify (плагин монтируется на app).
-  const bootstrapOpts: Parameters<typeof bootstrapBot>[1] = {};
+  const bootstrapOpts: Parameters<typeof bootstrapBot>[1] = { pool };
   if (config.TG_WEBHOOK_SECRET) bootstrapOpts.secretToken = config.TG_WEBHOOK_SECRET;
   const bot = await bootstrapBot(app, bootstrapOpts);
   resources.bot = bot;
@@ -120,7 +158,11 @@ async function main(): Promise<void> {
 
   // Cron: hourly pull GetCourse subscribers (SPEC §2.11 AC-31).
   try {
-    await scheduleGetCoursePullCron();
+    if (config.GC_PULL_DISABLED) {
+      log.info({}, 'gc-pull cron: skipped (GC_PULL_DISABLED=true)');
+    } else {
+      await scheduleGetCoursePullCron();
+    }
   } catch (err) {
     log.warn({ err }, 'gc-pull cron: failed to schedule (continuing)');
   }

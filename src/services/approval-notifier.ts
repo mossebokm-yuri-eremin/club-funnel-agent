@@ -39,6 +39,32 @@ function extractSlideUrls(assets: unknown): string[] {
   return [];
 }
 
+function extractSlideTexts(slides: unknown): string[] {
+  if (!Array.isArray(slides)) return [];
+  return slides
+    .map((s) => {
+      if (typeof s === 'string') return s;
+      if (s && typeof s === 'object') {
+        const obj = s as { text?: unknown; body?: unknown; content?: unknown };
+        if (typeof obj.text === 'string') return obj.text;
+        if (typeof obj.body === 'string') return obj.body;
+        if (typeof obj.content === 'string') return obj.content;
+      }
+      return '';
+    })
+    .filter((t) => t.length > 0);
+}
+
+function formatCarouselText(texts: string[]): string | null {
+  if (texts.length === 0) return null;
+  const head = `🎴 ТЕКСТ КАРУСЕЛИ (${texts.length} слайдов):\n\n`;
+  const body = texts
+    .map((t, i) => `${i + 1}. ${t}`)
+    .join('\n\n')
+    .slice(0, 3800);
+  return head + body;
+}
+
 export interface NotifyApprovalInput {
   contentPackageId: string;
   /** TG chat_id куда слать. По умолчанию = config.YE_TG_USER_ID. */
@@ -81,6 +107,7 @@ export async function notifyApprovalReady(
   }
 
   const slideUrls = extractSlideUrls(pkg.data.assets);
+  const slideTexts = extractSlideTexts(pkg.data.carousel_slides);
 
   // Сообщение 1: краткое резюме идеи + рилс-описание
   const header =
@@ -93,26 +120,24 @@ export async function notifyApprovalReady(
   // Сообщение 2: пост в TG
   const postMsg = `📝 ПОСТ В TG:\n${pkg.data.tg_post.slice(0, 3500)}`;
 
-  // Сообщение 3: альбом картинок карусели (если есть)
+  // Сообщение 3: текст слайдов карусели (нумерованный) — чтобы было читаемо
+  // даже если картинки placeholder/недоступны.
+  const slidesTextMsg = formatCarouselText(slideTexts);
+
   await sendMessage(fetchFn, token, chatId, header);
   await sendMessage(fetchFn, token, chatId, postMsg);
+  if (slidesTextMsg) await sendMessage(fetchFn, token, chatId, slidesTextMsg);
+  // Сообщение 4: альбом картинок карусели (если есть)
   if (slideUrls.length > 0) {
     await sendMediaGroup(fetchFn, token, chatId, slideUrls.slice(0, 10));
-  } else {
-    await sendMessage(
-      fetchFn,
-      token,
-      chatId,
-      `🖼 Карусели: текст слайдов готов в content_packages.carousel_slides, картинки ещё не отрендерены (Gemini ключ есть, но рендер мог упасть).`,
-    );
   }
   await sendMessage(
     fetchFn,
     token,
     chatId,
-    `✅ content_package_id: \`${pkg.data.id}\`\n` +
-      `Скоро здесь будут кнопки Принять / Переделать / Коммент / Отменить.`,
+    `✅ content_package_id: \`${pkg.data.id}\`\n\nВыбери действие ниже.`,
     'Markdown',
+    buildApprovalKeyboard(pkg.data.id),
   );
 
   log.info(
@@ -126,12 +151,32 @@ export async function notifyApprovalReady(
   return { status: 'ok' };
 }
 
+interface InlineKeyboard {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+}
+
+function buildApprovalKeyboard(pkgId: string): InlineKeyboard {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Принять', callback_data: `cp:approve:${pkgId}` },
+        { text: '🔄 Переделать', callback_data: `cp:reject:${pkgId}` },
+      ],
+      [
+        { text: '💬 Коммент', callback_data: `cp:comment:${pkgId}` },
+        { text: '❌ Отменить', callback_data: `cp:cancel:${pkgId}` },
+      ],
+    ],
+  };
+}
+
 async function sendMessage(
   fetchFn: typeof fetch,
   token: string,
   chatId: number,
   text: string,
   parseMode?: 'Markdown' | 'HTML',
+  replyMarkup?: InlineKeyboard,
 ): Promise<void> {
   const body: Record<string, unknown> = {
     chat_id: chatId,
@@ -139,6 +184,7 @@ async function sendMessage(
     disable_web_page_preview: true,
   };
   if (parseMode) body.parse_mode = parseMode;
+  if (replyMarkup) body.reply_markup = replyMarkup;
   const res = await fetchFn(tgApi(token, 'sendMessage'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

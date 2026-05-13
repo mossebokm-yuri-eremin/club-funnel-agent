@@ -145,6 +145,35 @@ Beget блокирует IP `213.159.78.70` на сетевом уровне (н
 
 ---
 
+---
+
+## 🚀 Сессия 2026-05-13 → 2026-05-14 — E2E pipeline + кнопки approval
+
+### Что сделано автономно через Tailscale-SSH
+- Исправлено 4 бага в коде (BullMQ jobId с `:`, Anthropic thinking format для opus-4-7, strategy cold-start fallback, Nano Banana placeholder для геоблока).
+- 7 голосовых ("5 заблуждений дизайнеров") прошли весь pipeline: voice → STT → idea → strategy → content → carousel → Telegram. Юрий получил пакеты в @Realizacia_marketing_bot.
+- Реализованы кнопки одобрения (✅ Принять / 🔄 Переделать / 💬 Коммент / ❌ Отменить) под каждым content_package — callback handler в боте обновляет approval_status в БД.
+- approval-notifier теперь шлёт отдельным сообщением текст карусели (нумерованный список слайдов) — Юрий видит контент даже при placeholder картинках.
+- Установлен Cloudflare WARP на VPS — НЕ обходит геоблок Gemini (loc=RU остаётся). См. backlog.md P1.1.
+- `GC_PULL_DISABLED=true` в .env — getcourse_pull воркер отключён, cron тоже. Спам 404 прекратится после pm2 restart.
+- `pm2-logrotate` установлен (10M, 7 дней, compress).
+- `/root/.bash_history` и `/home/club/.bash_history` зачищены.
+- Созданы `credentials-recovery-plan.md` и `backlog.md` (P0/P1/P2/P3).
+
+### TODO для Юрия
+- Подключить GetCourse: найти человека, получить `GC_API_BASE` / `GC_API_TOKEN` / `GC_WEBHOOK_SECRET`, прислать агенту → агент развернёт за 10 мин (см. `backlog.md` P2.2).
+- Решить про прокси Gemini: 4 варианта в `backlog.md` P1.1. Рекомендую Cloudflare Worker proxy.
+- Сохранить копию `.env` и креды по `credentials-recovery-plan.md`.
+
+### Env-флаги обхода (включены сейчас на VPS)
+```
+STRATEGY_COLD_START_FALLBACK_B=true   # bonus_library пустая → B вместо C
+NANO_BANANA_PLACEHOLDER_MODE=true     # серый PNG вместо Gemini (геоблок РФ)
+GC_PULL_DISABLED=true                 # GetCourse pull выключен до кредов
+```
+
+---
+
 ## История проблем (для запоминания)
 
 - ⚠ Beget VPS не предлагает LUKS из коробки → используем pgcrypto на уровне БД

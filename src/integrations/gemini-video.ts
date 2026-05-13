@@ -96,7 +96,8 @@ export async function analyzeVideo(
   const apiKey = config.GEMINI_API_KEY;
   if (!apiKey) throw new Error('gemini-video: GEMINI_API_KEY is not set');
   const model = config.GEMINI_VIDEO_MODEL;
-  const fetchFn = deps.fetchFn ?? fetch;
+  const { geminiFetch } = await import('./gemini-fetch.js');
+  const fetchFn = deps.fetchFn ?? (geminiFetch as unknown as typeof fetch);
   const readFile = deps.readFile ?? fs.readFile;
   const baseUrl = deps.baseUrl ?? DEFAULT_BASE_URL;
 
