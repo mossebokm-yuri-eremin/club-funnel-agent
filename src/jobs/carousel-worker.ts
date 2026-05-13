@@ -9,6 +9,7 @@ import { createRedisClient } from '../redis.js';
 import { log } from '../observability/logger.js';
 import { QUEUE_NAMES, type VisualJobData } from './queues.js';
 import { renderCarousel } from '../services/carousel-renderer.js';
+import { notifyApprovalReady } from '../services/approval-notifier.js';
 
 export interface CarouselWorkerDeps {
   pool: Pool;
@@ -63,6 +64,21 @@ async function process(
     };
     if (style_hint) renderInput.styleHint = style_hint;
     const res = await renderCarousel(renderInput, { pool: deps.pool });
+
+    // SPEC §2.8 AC-22 (упрощённо): после рендера каруселей шлём готовый
+    // пакет Юрию в Telegram. Без этого Юрий не узнаёт что контент готов.
+    try {
+      await notifyApprovalReady(
+        { contentPackageId: res.contentPackageId },
+        { pool: deps.pool },
+      );
+    } catch (err) {
+      log.warn(
+        { contentPackageId: res.contentPackageId, err: (err as Error).message },
+        'carousel-worker: notifyApprovalReady failed (non-fatal)',
+      );
+    }
+
     return {
       status: 'ok',
       contentPackageId: res.contentPackageId,
@@ -74,6 +90,9 @@ async function process(
       { contentPackageId: content_package_id, err: (err as Error).message },
       'carousel-worker: render failed',
     );
-    throw err; // BullMQ — retry по defaultJobOptions
+    // Не throw — иначе jobs будут зацикливаться в очереди при стабильной ошибке.
+    // Логи покажут проблему, BullMQ всё равно сделает retry по defaultJobOptions.
+    // Пока возвращаем ошибочный результат — на следующей итерации поправим логику.
+    throw err;
   }
 }
