@@ -23,13 +23,27 @@ function getProxyAgent(): ProxyAgent | null {
   const url = config.GEMINI_HTTPS_PROXY?.trim();
   if (!url) return null;
   if (cachedAgent && cachedProxyUrl === url) return cachedAgent;
-  cachedAgent = new ProxyAgent(url);
-  cachedProxyUrl = url;
-  log.info(
-    { host: safeProxyHost(url) },
-    'gemini-fetch: ProxyAgent initialized',
-  );
-  return cachedAgent;
+  // undici.ProxyAgent с user:pass в URL не всегда корректно прокидывает Basic auth.
+  // Разделяем URL и передаём token явно через Proxy-Authorization header.
+  try {
+    const u = new URL(url);
+    const uri = `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ''}`;
+    const hasAuth = u.username !== '' || u.password !== '';
+    if (hasAuth) {
+      const user = decodeURIComponent(u.username);
+      const pass = decodeURIComponent(u.password);
+      const token = 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
+      cachedAgent = new ProxyAgent({ uri, token });
+    } else {
+      cachedAgent = new ProxyAgent({ uri });
+    }
+    cachedProxyUrl = url;
+    log.info({ host: safeProxyHost(url), withAuth: hasAuth }, 'gemini-fetch: ProxyAgent initialized');
+    return cachedAgent;
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'gemini-fetch: ProxyAgent init failed, falling back to direct');
+    return null;
+  }
 }
 
 function safeProxyHost(url: string): string {
