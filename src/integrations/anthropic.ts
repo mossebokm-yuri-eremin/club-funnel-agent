@@ -158,7 +158,16 @@ export async function callAnthropic(opts: AnthropicCallOptions): Promise<Anthrop
   if (opts.temperature !== undefined) params.temperature = opts.temperature;
   if (opts.mode === 'thinking') {
     const budget = opts.thinkingBudgetTokens ?? config.ANTHROPIC_THINKING_BUDGET_TOKENS;
-    params.thinking = { type: 'enabled', budget_tokens: budget };
+    // opus-4-7+ требует новый формат: thinking.type='adaptive' + output_config.effort.
+    // Старый enabled+budget_tokens оставляем для sonnet-4-6 / haiku-4-5.
+    if (/opus-4-7|opus-5|sonnet-4-7|sonnet-5/.test(model)) {
+      const effort: 'low' | 'medium' | 'high' =
+        budget >= 12000 ? 'high' : budget >= 4000 ? 'medium' : 'low';
+      (params as unknown as Record<string, unknown>).thinking = { type: 'adaptive' };
+      (params as unknown as Record<string, unknown>).output_config = { effort };
+    } else {
+      params.thinking = { type: 'enabled', budget_tokens: budget };
+    }
     // temperature MUST be unset (or 1) with extended thinking
     delete params.temperature;
   }
