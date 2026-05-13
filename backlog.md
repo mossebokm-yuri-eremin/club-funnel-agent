@@ -18,17 +18,24 @@
 
 ## P1 — Эта неделя
 
-### P1.1 — Реальные картинки каруселей (заменить placeholder)
+### P1.1 — Реальные картинки каруселей (billing блокер)
 
-**Контекст:** `NANO_BANANA_PLACEHOLDER_MODE=true` сейчас включён, т.к. VPS Beget в РФ блокируется Gemini API (`FAILED_PRECONDITION: User location is not supported`). Попробован Cloudflare WARP — не помог: `loc=RU` в trace, Google всё равно режет.
+**Прогресс 2026-05-14:**
+- ✅ HTTPS-прокси NL подключён: `http://kKXDNS:LVmZPy@77.83.187.137:8000`
+- ✅ Реализовано через `undici.ProxyAgent` + `undici.fetch` в `src/integrations/gemini-fetch.ts`
+- ✅ ListModels OK, реальные модели возвращаются: `gemini-2.5-flash-image` (= Nano Banana по гугл-внутреннему названию)
+- ✅ `GEMINI_IMAGE_MODEL=gemini-2.5-flash-image` (старое `gemini-3-pro-image` — не существует)
+- ❌ Image generation **блокируется на Free Tier**: HTTP 429, `Quota exceeded: generate_content_free_tier_requests, limit: 0`
 
-**Варианты:**
-1. **Cloudflare Worker как реверс-прокси для Gemini** (рекомендую): задеплоить готовый open-source `gemini-proxy` (npm/github), Worker free-tier ≥100k запросов/день. Нужен Cloudflare account + `wrangler login`. После — поменять base URL в `src/integrations/nano-banana.ts` или через новый env `GEMINI_API_BASE`.
-2. **2-й VPS вне РФ** как HTTP-прокси (Hetzner CX11 €4.5/мес, DO droplet $4/мес). Поставить tinyproxy/squid, прописать через `HTTP_PROXY` env в pm2.
-3. **WARP+** ($1.99/мес) — даёт выход через не-RU IP, в отличие от free.
-4. **Datacenter-прокси сервис** (ProxyEmpire/Webshare $5-10/мес) — готовое решение.
+**Блокер:** активировать billing в Google AI Studio / Google Cloud для проекта (см. `docs/GEMINI_PROXY_SETUP.md` §6.5).
 
-**Action:** Юрий выбирает вариант → агент деплоит за 10-30 мин.
+**После billing:**
+1. Юрий активирует billing.
+2. Через 5–10 мин агент тестит `curl -X POST -H "Authorization: Bearer $TEST_ENDPOINT_TOKEN" http://127.0.0.1:3000/test/image-gen` — ожидаем `{"ok":true,"bytes":>50000}`.
+3. Выключает `NANO_BANANA_PLACEHOLDER_MODE=false`.
+4. Прогоняет старые pending content_packages через visual_queue → реальные картинки.
+
+**Сейчас:** `NANO_BANANA_PLACEHOLDER_MODE=true` — pipeline работает с серыми placeholder картинками.
 
 ### P1.2 — Восстановить отправку картинок-каруселей с текстом
 

@@ -89,6 +89,33 @@ curl -X POST http://127.0.0.1:3000/test/image-gen \
 Откат: поставить `NANO_BANANA_PLACEHOLDER_MODE=true` снова → серые placeholder'ы
 вернутся, pipeline продолжит работать без реальных картинок.
 
+## 6.5. ⚠️ Billing (обязательно для image generation)
+
+Google AI Studio Free Tier имеет **0 запросов** на image generation
+(`generate_content_free_tier_requests` limit = 0). Текущий API key возвращает
+HTTP 429 даже через прокси.
+
+**Что сделать:**
+1. https://aistudio.google.com → Get API key.
+2. Перейти на **Paid plan** (или включить billing на существующий проект через
+   https://console.cloud.google.com/billing).
+3. Привязать payment method (карта).
+4. Старый API key обычно начинает работать через 5–10 минут после активации
+   billing (можно проверить через тот же `/test/image-gen`).
+5. Если нет — сгенерировать **новый API key** в paid проекте, поменять в
+   `/etc/club-funnel/.env` `GEMINI_API_KEY=...` и рестартануть pm2.
+
+**Стоимость (на ~2026-05-14):**
+- `gemini-2.5-flash-image`: ~$0.039 за 1 картинку (1024×1024).
+- 10 каруселей/день × 10 слайдов × $0.039 = ~$4/день ≈ **$120/мес**.
+- Бюджет можно ограничить через budget alert в Google Cloud Billing.
+
+Также установи в `/etc/club-funnel/.env`:
+```
+GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
+```
+(Уже установлено — заменил старое `gemini-3-pro-image`, такого имени у Google нет.)
+
 ## 7. После переезда в Аргентину
 
 Если VPS переедет в страну, где Gemini доступен, прокси можно отключить:
