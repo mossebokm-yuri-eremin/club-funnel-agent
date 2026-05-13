@@ -19,11 +19,24 @@ echo
 echo "▶ 2/8 pm2 delete + clean restart"
 sudo -u club -H pm2 delete club-funnel-agent 2>&1 | tail -2 || true
 
-# 3. Удаляем dist полностью — чтобы tsc гарантированно пересобрал
+# 3. Удаляем dist полностью + tsbuildinfo + npm cache — чтобы tsc гарантированно пересобрал
 echo
-echo "▶ 3/8 rm dist/ + clean build"
-sudo -u club rm -rf dist
-sudo -u club -H npm run build 2>&1 | tail -3
+echo "▶ 3/8 rm dist/ + clean build (с явной проверкой)"
+sudo -u club rm -rf dist node_modules/.cache *.tsbuildinfo .tsbuildinfo 2>/dev/null || true
+sudo -u club -H npm run build 2>&1 | tee /tmp/build.log | tail -10
+echo
+if [ ! -f dist/src/jobs/stt-worker.js ]; then
+  echo "❌ BUILD FAILED — dist/src/jobs/stt-worker.js не создан. Содержимое /tmp/build.log:"
+  tail -30 /tmp/build.log
+  echo "Прерываюсь."
+  exit 1
+fi
+# Дополнительная страховка: если фикс не попал в скомпилированный файл — форсим tsc -b --force
+if ! grep -q "about to enqueue" dist/src/jobs/stt-worker.js; then
+  echo "⚠ stt-worker.js скомпилирован, но фикс не виден — форсим tsc -b --force"
+  sudo -u club rm -rf dist
+  sudo -u club -H npx tsc -p tsconfig.build.json --force 2>&1 | tail -10
+fi
 
 # 4. Проверяем что фиксы попали в скомпилированный код
 echo
