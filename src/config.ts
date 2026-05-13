@@ -120,6 +120,11 @@ const ConfigSchema = z.object({
   STRATEGY_A_MIN_SIMILARITY: floatNum.default(0.85),
   STRATEGY_C_MAX_SIMILARITY: floatNum.default(0.65),
   STRATEGY_B_PERIOD_IDEAS: intNum.default(10),
+  /** При cold start (bonus_library пустая) выбирать B (быстрая карусель) вместо C. */
+  STRATEGY_COLD_START_FALLBACK_B: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
   LONGREAD_MIN_WORDS: intNum.default(1500),
   LONGREAD_MAX_WORDS: intNum.default(2500),
   BONUS_CR_DROP_THRESHOLD_PCT: floatNum.default(30),

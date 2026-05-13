@@ -149,6 +149,17 @@ export async function chooseStrategy(
   }
 
   if (!top1 || sim < cMax) {
+    // Cold start fallback: если bonus_library пустая и STRATEGY_COLD_START_FALLBACK_B=true —
+    // делаем B (быструю карусель без лонгрида), чтобы пайплайн не упирался в AC-16 outline approval.
+    if (!top1 && config.STRATEGY_COLD_START_FALLBACK_B) {
+      return {
+        strategy: 'B',
+        reasoning: `bonus_library пустая (cold start). STRATEGY_COLD_START_FALLBACK_B=true → быстрая карусель-крючок без лонгрида.`,
+        bonusId: null,
+        recommendedPromptVersion: STRATEGY_PROMPT_MAP.B,
+        deterministic: true,
+      };
+    }
     return {
       strategy: 'C',
       reasoning: top1
