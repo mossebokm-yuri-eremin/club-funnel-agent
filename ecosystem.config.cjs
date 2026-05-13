@@ -6,7 +6,7 @@ module.exports = {
   apps: [
     {
       name: 'club-funnel-agent',
-      script: 'dist/index.js',
+      script: 'dist/src/index.js',
       cwd: '/opt/club-funnel',
       instances: 1,
       exec_mode: 'fork',
