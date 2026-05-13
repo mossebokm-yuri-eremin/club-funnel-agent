@@ -97,12 +97,21 @@ async function process(
 
   // Enqueue idea-worker — он сделает structured idea-builder через Claude,
   // потом сам поставит content-worker. Без этого пайплайн обрывается на STT.
+  log.info({ ideaId }, 'stt-worker: about to enqueue idea_queue');
   try {
-    await ideaQueue().add('build', { idea_id: ideaId }, { jobId: `idea:${ideaId}` });
+    const job = await ideaQueue().add(
+      'build',
+      { idea_id: ideaId },
+      { jobId: `idea:${ideaId}` },
+    );
+    log.info(
+      { ideaId, jobId: job.id, queue: 'idea_queue' },
+      'stt-worker: idea ENQUEUED ok',
+    );
   } catch (err) {
-    log.warn(
-      { ideaId, err: (err as Error).message },
-      'stt-worker: failed to enqueue idea (continuing)',
+    log.error(
+      { ideaId, err: (err as Error).message, stack: (err as Error).stack },
+      'stt-worker: FAILED to enqueue idea',
     );
   }
 

@@ -31,6 +31,12 @@ export function createIdeaWorker(deps: IdeaWorkerDeps): Worker<IdeaJobData, Idea
       concurrency: deps.concurrency ?? 2,
     },
   );
+  worker.on('ready', () => {
+    log.info({ queue: QUEUE_NAMES.IDEA }, 'idea-worker: READY listening');
+  });
+  worker.on('active', (job) => {
+    log.info({ jobId: job.id, ideaId: job.data.idea_id }, 'idea-worker: ACTIVE start');
+  });
 
   worker.on('failed', (job, err) => {
     log.error(
