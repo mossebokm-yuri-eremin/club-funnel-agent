@@ -6,6 +6,8 @@
 *.key
 gdrive-sa.json
 .gpg-passphrase
+SECURITY-ROTATION.md
+SECURITY-*.md
 
 # Логи и временные
 *.log
