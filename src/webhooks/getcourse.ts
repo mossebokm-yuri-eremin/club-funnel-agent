@@ -202,7 +202,36 @@ export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhook
     const sigStr = Array.isArray(sig) ? sig[0] : sig;
 
     if (!verifyHmac(raw, sigStr, opts.secret)) {
-      log.warn({ ip: req.ip, hasHeader: Boolean(sigStr) }, 'gc-webhook: invalid HMAC');
+      // TEMP debug: пишем что именно прислал GC, чтобы найти правильную формулу подписи.
+      const crypto = await import('node:crypto');
+      const expectedRaw = crypto.createHmac('sha256', opts.secret).update(raw).digest('hex');
+      const rawText = raw.toString('utf8');
+      const expectedDecoded = crypto.createHmac('sha256', opts.secret).update(rawText).digest('hex');
+      // Попробуем сериализовать парсед body в JSON и считать HMAC от него
+      let expectedJson = '';
+      try {
+        const parsed = req.body as Record<string, unknown> | undefined;
+        if (parsed) {
+          expectedJson = crypto
+            .createHmac('sha256', opts.secret)
+            .update(JSON.stringify(parsed))
+            .digest('hex');
+        }
+      } catch { /* ignore */ }
+      log.warn(
+        {
+          ip: req.ip,
+          hasHeader: Boolean(sigStr),
+          received_sig: typeof sigStr === 'string' ? sigStr.slice(0, 80) : null,
+          expected_raw_hex: expectedRaw,
+          expected_decoded_hex: expectedDecoded,
+          expected_json_hex: expectedJson,
+          content_type: req.headers['content-type'] ?? null,
+          raw_body_preview: rawText.slice(0, 300),
+          raw_body_length: raw.length,
+        },
+        'gc-webhook: HMAC mismatch — debug',
+      );
       return reply.code(401).send({ error: 'invalid_signature' });
     }
 
