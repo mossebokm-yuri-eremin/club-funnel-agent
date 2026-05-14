@@ -3,7 +3,7 @@ import { config } from './config.js';
 import { log } from './observability/logger.js';
 import { pool, closePool } from './db/client.js';
 import { redis, closeRedis } from './redis.js';
-import { getCourseWebhookPlugin, redisIdempotencyStore, type RedisLike } from './webhooks/getcourse.js';
+import { getCourseWebhookPlugin } from './webhooks/getcourse.js';
 import { bootstrapBot } from './bot/index.js';
 import { closeAllQueues, getCoursePullQueue } from './jobs/queues.js';
 import { createSttWorker } from './jobs/stt-worker.js';
@@ -14,6 +14,10 @@ import { createContentWorker } from './jobs/content-worker.js';
 import { createCarouselWorker } from './jobs/carousel-worker.js';
 import { createFunnelWorker } from './jobs/funnel-worker.js';
 import { createGetCoursePullWorker } from './jobs/getcourse-pull-worker.js';
+import {
+  createGetCourseParserWorker,
+  scheduleGetCourseParserCron,
+} from './jobs/getcourse-parser-worker.js';
 import type { Bot } from 'grammy';
 
 interface Shutdownable {
@@ -66,11 +70,33 @@ async function buildHttpServer(): Promise<FastifyInstance> {
     }
   });
 
-  // GetCourse webhook (HMAC) — регистрируем первым: он ставит rawBody parser.
+  // GetCourse webhook — пишет любой запрос в getcourse_raw_events, всегда 200.
+  // Парсинг → getcourse-parser-worker.ts (раз в 10 сек).
   await app.register(getCourseWebhookPlugin, {
     secret: config.GC_WEBHOOK_SECRET,
-    // ioredis Redis имеет ovrloads SET, которые TS не сводит к RedisLike напрямую.
-    idempotency: redisIdempotencyStore(redis as unknown as RedisLike),
+    pool,
+  });
+
+  // Admin: последние raw events GetCourse (для диагностики). Bearer = TEST_ENDPOINT_TOKEN.
+  app.get('/admin/getcourse/recent', async (req, reply) => {
+    const token = config.TEST_ENDPOINT_TOKEN;
+    const auth = (req.headers['authorization'] ?? '') as string;
+    if (!token || auth !== `Bearer ${token}`) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    const limitRaw = (req.query as { limit?: string } | undefined)?.limit;
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '20', 10) || 20, 1), 100);
+    const r = await pool.query(
+      `SELECT id, received_at, ip_address, hmac_valid, content_type,
+              parse_status, parse_error, parsed_event_type, parsed_user_email,
+              parsed_amount_kopecks, raw_payload, headers
+         FROM getcourse_raw_events
+        ORDER BY received_at DESC
+        LIMIT $1`,
+      [limit],
+    );
+    return { count: r.rows.length, events: r.rows };
   });
 
   return app;
@@ -99,6 +125,8 @@ function buildBotWorkers(bot: Bot): Shutdownable[] {
   } else {
     log.info({}, 'gc-pull: worker disabled via GC_PULL_DISABLED=true');
   }
+  // GetCourse raw-events parser (всегда включён — недорогой polling каждые 10s).
+  workers.push(createGetCourseParserWorker({ pool }));
   return workers;
 }
 
@@ -165,6 +193,13 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     log.warn({ err }, 'gc-pull cron: failed to schedule (continuing)');
+  }
+
+  // Cron: GetCourse raw-events parser (раз в 10 сек).
+  try {
+    await scheduleGetCourseParserCron();
+  } catch (err) {
+    log.warn({ err }, 'gc-parser cron: failed to schedule (continuing)');
   }
 
   await app.listen({ host: config.APP_HOST, port: config.APP_PORT });

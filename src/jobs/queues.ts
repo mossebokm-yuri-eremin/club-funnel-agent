@@ -18,6 +18,7 @@ export const QUEUE_NAMES = {
   VISUAL: 'visual_queue',
   FUNNEL: 'funnel_queue',
   GETCOURSE_PULL: 'getcourse_pull_queue',
+  GETCOURSE_PARSE: 'getcourse_parse_queue',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -207,6 +208,19 @@ export function getCoursePullQueue(): Queue<GetCoursePullJobData> {
   return _gcPull;
 }
 
+let _gcParse: Queue<Record<string, never>> | null = null;
+export function getCourseParseQueue(): Queue<Record<string, never>> {
+  if (!_gcParse) {
+    _gcParse = buildQueue<Record<string, never>>(QUEUE_NAMES.GETCOURSE_PARSE, {
+      ...DEFAULT_JOB_OPTIONS,
+      attempts: 1, // не ретраить — следующая итерация cron подберёт снова
+      removeOnComplete: { age: 3600, count: 100 },
+      removeOnFail: { age: 24 * 3600, count: 50 },
+    });
+  }
+  return _gcParse;
+}
+
 export async function closeAllQueues(): Promise<void> {
   const all: Queue[] = [];
   if (_audio) all.push(_audio);
@@ -217,6 +231,7 @@ export async function closeAllQueues(): Promise<void> {
   if (_visual) all.push(_visual);
   if (_funnel) all.push(_funnel);
   if (_gcPull) all.push(_gcPull);
+  if (_gcParse) all.push(_gcParse);
   await Promise.allSettled(all.map((q) => q.close()));
   _audio = null;
   _refDl = null;
@@ -226,4 +241,5 @@ export async function closeAllQueues(): Promise<void> {
   _visual = null;
   _funnel = null;
   _gcPull = null;
+  _gcParse = null;
 }

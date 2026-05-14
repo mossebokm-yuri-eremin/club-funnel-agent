@@ -1,101 +1,41 @@
+// GetCourse webhook — raw-events буфер.
+//
+// Логика (по решению Юрия 2026-05-14):
+//   1. Принимаем ЛЮБОЙ POST на /webhook/getcourse (JSON или x-www-form-urlencoded).
+//   2. Сохраняем raw_payload + headers + IP в таблицу getcourse_raw_events.
+//   3. Всегда отвечаем 200 OK — GetCourse ответ не парсит, retry'ить нам не нужно.
+//   4. HMAC опционален: если подпись пришла — валидируем и пишем hmac_valid=true/false,
+//      если не пришла — hmac_valid=NULL (warning в логи, но не отказываем).
+//   5. Парсинг → getcourse-parser-worker.ts (раз в 10 сек) → subscribers + Telegram notify.
+//
+// Sacred (CLAUDE.md §4): деньги в копейках (integer × 100), float — запрещены.
+
 import crypto from 'node:crypto';
+import type { Pool } from 'pg';
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { log } from '../observability/logger.js';
 
-// Заголовок подписи: SPEC §9.4 → 'x-gc-signature' (lower-case в fastify).
-// HTTP-заголовки case-insensitive; Fastify нормализует к lowercase.
-// В ТЗ для подрядчика — X-GetCourse-Signature (см. docs/tz-getcourse-webhook.md).
+// Заголовки подписи (case-insensitive в Fastify → lowercase).
 export const GC_SIGNATURE_HEADER = 'x-getcourse-signature';
-// Старое имя оставляем как fallback на случай, если подрядчик уже настроил с ним.
 export const GC_SIGNATURE_HEADER_LEGACY = 'x-gc-signature';
-// TTL для ключей идемпотентности: 7 дней. GetCourse может ретраить webhook
-// несколько раз; 7 суток — с запасом перекрывает SLA и pull-reconcile.
-// TODO confirm with Yuri: уточнить SLA ретраев GC.
-export const DEFAULT_IDEMPOTENCY_TTL_SEC = 60 * 60 * 24 * 7;
-
-export interface IdempotencyStore {
-  /** Возвращает true, если ключ был установлен впервые; false — если уже существовал. */
-  acquire(key: string, ttlSeconds: number): Promise<boolean>;
-}
-
-// Минимальный интерфейс ioredis, который нам нужен. Не тянем тип Redis из ioredis,
-// чтобы webhook оставался тестируемым без реального клиента.
-export interface RedisLike {
-  set(
-    key: string,
-    value: string,
-    nxMode: 'NX',
-    ttlMode: 'EX',
-    ttlSeconds: number,
-  ): Promise<'OK' | null>;
-}
-
-export function redisIdempotencyStore(redis: RedisLike): IdempotencyStore {
-  return {
-    async acquire(key, ttlSeconds) {
-      const r = await redis.set(key, '1', 'NX', 'EX', ttlSeconds);
-      return r === 'OK';
-    },
-  };
-}
-
-// Поддерживаем два формата:
-//   1) Плоский x-www-form-urlencoded из GC UI (см. скриншот настроек):
-//      event, order_id, user_id, user_email, user_name, offer_id, offer_name,
-//      amount, paid_at, utm_source, utm_campaign, utm_content
-//   2) Старый вложенный JSON: { action, deal: { id, user: { email }, ... }, timestamp }
-export interface GetCourseDealPayload {
-  // --- плоский формат GC UI ---
-  event?: string;
-  order_id?: string | number;
-  user_id?: string | number;
-  user_email?: string;
-  user_name?: string;
-  offer_id?: string | number;
-  offer_name?: string;
-  amount?: string | number;
-  paid_at?: string;
-  utm_source?: string;
-  utm_campaign?: string;
-  utm_content?: string;
-  // --- старый вложенный формат (legacy) ---
-  action?: string;
-  deal?: {
-    id?: string | number;
-    status?: string;
-    user?: { email?: string; phone?: string; first_name?: string };
-    offer_id?: string | number;
-    amount?: string | number;
-    currency?: string;
-    utm?: Record<string, string>;
-    paid_at?: string;
-  };
-  timestamp?: number;
-  [k: string]: unknown;
-}
-
-export interface ProcessedResult {
-  /** true → выполнили реальную обработку, false → дубликат, пропустили. */
-  processed: boolean;
-  eventId: string;
-}
 
 export interface RegisterGetCourseWebhookOptions {
+  /** HMAC-секрет. Если опциональный (подрядчик не настроил) — НЕ отбраковываем. */
   secret: string;
-  idempotency: IdempotencyStore;
-  /** Бизнес-обработчик. Вызывается ТОЛЬКО после успешного HMAC и первой acquire. */
-  onPayload?: (payload: GetCourseDealPayload, ctx: { eventId: string; raw: Buffer }) => Promise<void> | void;
-  /** Префикс ключей в redis. По умолчанию 'idemp:gc-webhook'. */
-  idempotencyKeyPrefix?: string;
-  idempotencyTtlSec?: number;
+  /** PG pool — нужен чтобы писать в getcourse_raw_events. */
+  pool: Pool;
   route?: string;
 }
 
-// HMAC-SHA256 hex, как описано в SPEC §6.2 и §9.4.
-export function verifyHmac(rawBody: Buffer, signatureHeader: string | undefined, secret: string): boolean {
-  if (!signatureHeader) return false;
+// HMAC-SHA256 hex. Возвращает true / false / null (null = заголовка не было).
+export function verifyHmac(
+  rawBody: Buffer,
+  signatureHeader: string | undefined,
+  secret: string,
+): boolean | null {
+  if (!signatureHeader) return null;
+  if (!secret) return null;
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-  // Сравниваем lower-case; GC присылает hex, регистр не критичен.
   const got = signatureHeader.trim().toLowerCase();
   if (expected.length !== got.length) return false;
   try {
@@ -105,40 +45,8 @@ export function verifyHmac(rawBody: Buffer, signatureHeader: string | undefined,
   }
 }
 
-export function eventIdFromPayload(payload: GetCourseDealPayload): string {
-  // Поддержка двух форматов GC payload:
-  //   - плоский (event, order_id) — из UI настроек webhook'a GetCourse
-  //   - вложенный (action, deal.id) — старый legacy
-  // Идемпотентность: event/action + order_id/deal.id + timestamp/paid_at.
-  const action = (payload.event ?? payload.action ?? 'unknown').toString();
-  const dealId =
-    payload.order_id !== undefined
-      ? String(payload.order_id)
-      : payload.deal?.id !== undefined
-        ? String(payload.deal.id)
-        : null;
-  const ts =
-    payload.paid_at !== undefined
-      ? String(payload.paid_at)
-      : payload.timestamp !== undefined
-        ? String(payload.timestamp)
-        : '0';
-  if (dealId) return `${action}:${dealId}:${ts}`;
-  const h = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
-  return `${action}:noid:${h}`;
-}
+// --- raw body parser (json + form-urlencoded) --------------------------------
 
-function getRawBody(req: FastifyRequest): Buffer | null {
-  const raw = (req as FastifyRequest & { rawBody?: unknown }).rawBody;
-  if (Buffer.isBuffer(raw)) return raw;
-  return null;
-}
-
-// Регистрирует content-type parsers для application/json И application/x-www-form-urlencoded,
-// сохраняющие raw body для HMAC-проверки. GetCourse шлёт x-www-form-urlencoded (см. их UI
-// "Тело запроса"), Stripe-подобные интеграции — JSON. Поддерживаем оба.
-// Должен вызываться один раз на инстансе fastify (idempotent — повторный вызов
-// не падает, мы ловим исключение типа FST_ERR_CTP_ALREADY_PRESENT).
 function parseFormUrlEncoded(raw: Buffer): Record<string, string> {
   const out: Record<string, string> = {};
   const text = raw.toString('utf8');
@@ -149,9 +57,9 @@ function parseFormUrlEncoded(raw: Buffer): Record<string, string> {
     const rawKey = eq >= 0 ? pair.slice(0, eq) : pair;
     const rawVal = eq >= 0 ? pair.slice(eq + 1) : '';
     try {
-      const k = decodeURIComponent(rawKey.replace(/\+/g, ' '));
-      const v = decodeURIComponent(rawVal.replace(/\+/g, ' '));
-      out[k] = v;
+      out[decodeURIComponent(rawKey.replace(/\+/g, ' '))] = decodeURIComponent(
+        rawVal.replace(/\+/g, ' '),
+      );
     } catch {
       out[rawKey] = rawVal;
     }
@@ -176,91 +84,89 @@ export function ensureRawBodyParser(app: FastifyInstance): void {
       if (code !== 'FST_ERR_CTP_ALREADY_PRESENT') throw err;
     }
   };
-
   addParser('application/json', (raw) => JSON.parse(raw.toString('utf8')));
   addParser('application/x-www-form-urlencoded', (raw) => parseFormUrlEncoded(raw));
 }
+
+function getRawBody(req: FastifyRequest): Buffer | null {
+  const raw = (req as FastifyRequest & { rawBody?: unknown }).rawBody;
+  if (Buffer.isBuffer(raw)) return raw;
+  return null;
+}
+
+// --- plugin ------------------------------------------------------------------
 
 export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhookOptions> = async (
   app,
   opts,
 ) => {
   const route = opts.route ?? '/webhook/getcourse';
-  const keyPrefix = opts.idempotencyKeyPrefix ?? 'idemp:gc-webhook';
-  const ttl = opts.idempotencyTtlSec ?? DEFAULT_IDEMPOTENCY_TTL_SEC;
-
   ensureRawBodyParser(app);
 
   app.post(route, async (req, reply) => {
     const raw = getRawBody(req);
-    if (!raw) {
-      log.warn({ ip: req.ip }, 'gc-webhook: missing raw body');
-      return reply.code(400).send({ error: 'missing_body' });
-    }
+    const contentType = (req.headers['content-type'] ?? null) as string | null;
+    const ip = req.ip;
 
-    const sig = req.headers[GC_SIGNATURE_HEADER] ?? req.headers[GC_SIGNATURE_HEADER_LEGACY];
+    // 1) HMAC статус (опциональный — null если не прислали).
+    const sig =
+      req.headers[GC_SIGNATURE_HEADER] ?? req.headers[GC_SIGNATURE_HEADER_LEGACY];
     const sigStr = Array.isArray(sig) ? sig[0] : sig;
-
-    if (!verifyHmac(raw, sigStr, opts.secret)) {
-      // TEMP debug: пишем что именно прислал GC, чтобы найти правильную формулу подписи.
-      const crypto = await import('node:crypto');
-      const expectedRaw = crypto.createHmac('sha256', opts.secret).update(raw).digest('hex');
-      const rawText = raw.toString('utf8');
-      const expectedDecoded = crypto.createHmac('sha256', opts.secret).update(rawText).digest('hex');
-      // Попробуем сериализовать парсед body в JSON и считать HMAC от него
-      let expectedJson = '';
-      try {
-        const parsed = req.body as Record<string, unknown> | undefined;
-        if (parsed) {
-          expectedJson = crypto
-            .createHmac('sha256', opts.secret)
-            .update(JSON.stringify(parsed))
-            .digest('hex');
-        }
-      } catch { /* ignore */ }
+    const hmacValid = raw ? verifyHmac(raw, sigStr, opts.secret) : null;
+    if (hmacValid === null && sigStr === undefined) {
+      log.warn({ ip }, 'gc-webhook: no signature header — accepting anyway');
+    } else if (hmacValid === false) {
       log.warn(
-        {
-          ip: req.ip,
-          hasHeader: Boolean(sigStr),
-          received_sig: typeof sigStr === 'string' ? sigStr.slice(0, 80) : null,
-          expected_raw_hex: expectedRaw,
-          expected_decoded_hex: expectedDecoded,
-          expected_json_hex: expectedJson,
-          content_type: req.headers['content-type'] ?? null,
-          raw_body_preview: rawText.slice(0, 300),
-          raw_body_length: raw.length,
-        },
-        'gc-webhook: HMAC mismatch — debug',
+        { ip, hasHeader: Boolean(sigStr) },
+        'gc-webhook: HMAC validation FAILED — saving event but mark as untrusted',
       );
-      return reply.code(401).send({ error: 'invalid_signature' });
     }
 
-    const payload = (req.body ?? {}) as GetCourseDealPayload;
-    const eventId = eventIdFromPayload(payload);
-    const key = `${keyPrefix}:${eventId}`;
-
-    const acquired = await opts.idempotency.acquire(key, ttl);
-    if (!acquired) {
-      log.info({ eventId }, 'gc-webhook: duplicate, skipping handler');
-      const result: ProcessedResult = { processed: false, eventId };
-      return reply.code(200).send(result);
+    // 2) payload — берём parsed (req.body) если есть, иначе пробуем raw.toString.
+    let payload: unknown = req.body;
+    if (payload === undefined || payload === null || payload === '') {
+      payload = raw ? raw.toString('utf8') : null;
     }
+    // jsonb не примет undefined/null; сохраним пустой объект если пусто.
+    const payloadForDb = payload === null || payload === undefined ? {} : payload;
 
-    if (opts.onPayload) {
-      try {
-        await opts.onPayload(payload, { eventId, raw });
-      } catch (err) {
-        // Намеренно не отдаём 5xx наружу: payload уже валиден (HMAC ok), а GC
-        // ретраит — это создаст шум. Кладём в DLQ через лог, разберём отдельно.
-        // TODO confirm with Yuri: либо вернуть 500 для авто-ретрая GC,
-        // либо явный async DLQ (BullMQ webhook_dlq из SPEC §3.5).
-        log.error({ err, eventId }, 'gc-webhook: handler failed; logged for DLQ');
+    // 3) headers — сохраняем все, для аудита.
+    const safeHeaders: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      // Авторизационные значения — маскируем (можем подтянуть из raw event при необходимости).
+      if (k === 'authorization' || k === 'x-api-key') {
+        safeHeaders[k] = typeof v === 'string' ? `${v.slice(0, 12)}…(redacted)` : v;
+      } else {
+        safeHeaders[k] = v;
       }
     }
 
-    const result: ProcessedResult = { processed: true, eventId };
-    return reply.code(200).send(result);
-  });
-};
+    // 4) INSERT raw event.
+    try {
+      const r = await opts.pool.query<{ id: string }>(
+        `INSERT INTO getcourse_raw_events
+            (raw_payload, headers, ip_address, hmac_valid, content_type, parse_status)
+          VALUES ($1::jsonb, $2::jsonb, $3, $4, $5, 'pending')
+          RETURNING id`,
+        [
+          JSON.stringify(payloadForDb),
+          JSON.stringify(safeHeaders),
+          ip,
+          hmacValid,
+          contentType,
+        ],
+      );
+      log.info(
+        { id: r.rows[0]?.id, hmacValid, contentType, ip },
+        'gc-webhook: raw event saved (pending parse)',
+      );
+    } catch (err) {
+      log.error({ err: (err as Error).message, ip }, 'gc-webhook: failed to insert raw event');
+      // ВСЁ РАВНО возвращаем 200 — GC retry не нужен, событие потеряно (отдельный alert).
+    }
 
-export default getCourseWebhookPlugin;
+    return reply.code(200).send({ status: 'received' });
+  });
+
+  log.info({ route }, 'gc-webhook: route registered (raw-events buffer)');
+};
