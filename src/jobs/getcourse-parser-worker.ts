@@ -107,11 +107,11 @@ async function processBatch(deps: GcParserDeps): Promise<{ processed: number; cl
         try {
           await deps.pool.query(
             `INSERT INTO subscribers (email, phone, status, club_paid_at, notes)
-               VALUES ($1, $2, 'club', COALESCE($3::timestamptz, NOW()), $4)
+               VALUES ($1, $2, 'paid', COALESCE($3::timestamptz, NOW()), $4)
              ON CONFLICT (lower(email)) WHERE email IS NOT NULL AND deleted_at IS NULL
                DO UPDATE
                   SET phone = COALESCE(EXCLUDED.phone, subscribers.phone),
-                      status = 'club',
+                      status = 'paid',
                       club_paid_at = COALESCE(EXCLUDED.club_paid_at, subscribers.club_paid_at),
                       last_seen_at = NOW(),
                       notes = COALESCE(EXCLUDED.notes, subscribers.notes)`,
