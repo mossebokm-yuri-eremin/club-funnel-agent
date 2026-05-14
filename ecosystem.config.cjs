@@ -16,6 +16,10 @@ module.exports = {
       max_memory_restart: '1024M',
       env: {
         NODE_ENV: 'production',
+        // VPS Beget (РФ): Node global fetch уходит в IPv6 → ETIMEDOUT к api.telegram.org
+        // (curl через IPv4 работает). Заставляем DNS возвращать IPv4 первым —
+        // approval-notifier перестаёт падать `fetch failed (non-fatal)`.
+        NODE_OPTIONS: '--dns-result-order=ipv4first',
       },
       env_file: '/etc/club-funnel/.env',
       out_file: '/var/log/club-funnel/out.log',
