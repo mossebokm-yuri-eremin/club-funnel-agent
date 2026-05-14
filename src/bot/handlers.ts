@@ -153,12 +153,17 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
           `UPDATE content_packages SET approval_status = $1, updated_at = NOW() WHERE id = $2`,
           [status, pkgId],
         );
-        const label = action === 'approve' ? '✅ Одобрено' : '✖ Отклонено';
+        // После ✅ — карусель остаётся в чате с пометкой "Готово к публикации".
+        // Юрий публикует сам или пересылает Анне вручную. ANNA_TG_CHAT_ID не используем.
+        const label =
+          action === 'approve'
+            ? '✅ Готово к публикации — опубликуй сам или перешли Анне'
+            : '✖ Отклонено';
         await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
         await ctx.editMessageText(`✅ content_package_id: \`${pkgId}\`\n\n${label}`, {
           parse_mode: 'Markdown',
         }).catch(() => {});
-        await ctx.answerCallbackQuery({ text: label });
+        await ctx.answerCallbackQuery({ text: label.slice(0, 64) });
         log.info({ pkgId, action, status }, 'approval-callback: status updated');
       } else if (action === 'regen') {
         // Перегенерация — берём idea_id из пакета, ставим новый job в content_queue.
