@@ -199,6 +199,125 @@ async function sendMessage(
   }
 }
 
+// ---- Longread approval flow (AC-16) ----
+
+function buildOutlineKeyboard(ideaId: string): InlineKeyboard {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Одобрить outline', callback_data: `lr:outline_approve:${ideaId}` },
+        { text: '🔄 Перегенерировать', callback_data: `lr:outline_regen:${ideaId}` },
+      ],
+      [{ text: '✖ Отменить лонгрид', callback_data: `lr:outline_cancel:${ideaId}` }],
+    ],
+  };
+}
+
+function buildDraftKeyboard(ideaId: string): InlineKeyboard {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Опубликовать в библиотеку', callback_data: `lr:draft_approve:${ideaId}` },
+        { text: '🔄 Перегенерировать', callback_data: `lr:draft_regen:${ideaId}` },
+      ],
+      [
+        { text: '✏️ Правка', callback_data: `lr:draft_edit:${ideaId}` },
+        { text: '✖ Отклонить', callback_data: `lr:draft_reject:${ideaId}` },
+      ],
+    ],
+  };
+}
+
+export async function notifyOutlineReady(
+  input: { ideaId: string },
+  deps: { pool: Pool; fetchFn?: typeof fetch },
+): Promise<{ status: 'ok' | 'skipped'; reason?: string }> {
+  const token = config.TELEGRAM_BOT_TOKEN;
+  const chatId = config.YE_TG_USER_ID;
+  if (!chatId) return { status: 'skipped', reason: 'YE_TG_USER_ID not set' };
+  const fetchFn = deps.fetchFn ?? fetch;
+  const r = await deps.pool.query(
+    `SELECT id, summary, pain_tag, longread_title, longread_code_word, longread_outline
+       FROM ideas WHERE id = $1`,
+    [input.ideaId],
+  );
+  const row = r.rows[0];
+  if (!row || !row.longread_outline) {
+    return { status: 'skipped', reason: 'outline not found' };
+  }
+  const sections = Array.isArray(row.longread_outline) ? row.longread_outline : [];
+  const lines: string[] = [];
+  lines.push(`📖 *Лонгрид на согласование*`);
+  lines.push('');
+  lines.push(`💡 Идея: ${row.summary ?? '(нет)'}`);
+  lines.push(`🏷 Боль: ${row.pain_tag ?? '(нет)'}`);
+  lines.push('');
+  lines.push(`*Заголовок:* ${row.longread_title ?? '(нет)'}`);
+  lines.push(`*Кодовое слово:* \`${row.longread_code_word ?? '???'}\``);
+  lines.push('');
+  lines.push('*Структура (5–8 секций):*');
+  sections.forEach((s: { h2?: string; summary?: string }, i: number) => {
+    lines.push(`*${i + 1}. ${s.h2 ?? '?'}*`);
+    lines.push(`   ${s.summary ?? '?'}`);
+  });
+  lines.push('');
+  lines.push(`Если одобришь — соберу полный лонгрид (1500–2500 слов).`);
+  await sendMessage(
+    fetchFn,
+    token,
+    chatId,
+    lines.join('\n').slice(0, 3900),
+    'Markdown',
+    buildOutlineKeyboard(input.ideaId),
+  );
+  log.info({ ideaId: input.ideaId }, 'approval-notifier: outline sent');
+  return { status: 'ok' };
+}
+
+export async function notifyLongreadDraftReady(
+  input: { ideaId: string },
+  deps: { pool: Pool; fetchFn?: typeof fetch },
+): Promise<{ status: 'ok' | 'skipped'; reason?: string }> {
+  const token = config.TELEGRAM_BOT_TOKEN;
+  const chatId = config.YE_TG_USER_ID;
+  if (!chatId) return { status: 'skipped', reason: 'YE_TG_USER_ID not set' };
+  const fetchFn = deps.fetchFn ?? fetch;
+  const r = await deps.pool.query(
+    `SELECT id, summary, longread_title, longread_code_word, longread_draft_md FROM ideas WHERE id = $1`,
+    [input.ideaId],
+  );
+  const row = r.rows[0];
+  if (!row || !row.longread_draft_md) {
+    return { status: 'skipped', reason: 'draft not found' };
+  }
+  const md: string = row.longread_draft_md;
+  const wordCount = (md.match(/[\p{L}\p{N}]+/gu) ?? []).length;
+  const preview = md.slice(0, 1800);
+  await sendMessage(
+    fetchFn,
+    token,
+    chatId,
+    `📖 *Полный лонгрид готов* — ${wordCount} слов\n\n*Заголовок:* ${row.longread_title ?? '(нет)'}\n*Кодовое слово:* \`${row.longread_code_word ?? '???'}\``,
+    'Markdown',
+  );
+  await sendMessage(fetchFn, token, chatId, `📄 *ПРЕВЬЮ (первые ~1800 символов):*\n\n${preview}`, 'Markdown');
+  if (md.length > 1800) {
+    // Хвост — без preview, чтобы Юрий мог пролистать в Telegram целиком (max 4096).
+    const tail = md.slice(1800, 1800 + 3500);
+    await sendMessage(fetchFn, token, chatId, `📄 *Продолжение:*\n\n${tail}`, 'Markdown');
+  }
+  await sendMessage(
+    fetchFn,
+    token,
+    chatId,
+    `Одобри для публикации в bonus_library, либо запроси правку.`,
+    undefined,
+    buildDraftKeyboard(input.ideaId),
+  );
+  log.info({ ideaId: input.ideaId, wordCount }, 'approval-notifier: draft sent');
+  return { status: 'ok' };
+}
+
 async function sendMediaGroup(
   fetchFn: typeof fetch,
   token: string,

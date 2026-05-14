@@ -172,15 +172,44 @@ async function process(
   let bonusTitle: string | null = null;
 
   if (decision.strategy === 'C') {
-    // Минимальный outline: 3 H2-блока, заполнятся пустыми summary — это пока
-    // заглушка для Phase 3. Реальный outline должен утверждать Юрий (AC-16).
-    // Здесь мы возвращаем skipped, чтобы caller (TG bot UI) предложил outline.
-    return {
-      status: 'skipped',
-      ideaId: idea.id,
-      strategy: 'C',
-      reason: 'strategy C requires outline approval (AC-16) — pending UI flow',
-    };
+    // Phase 7 AC-16: генерируем OUTLINE и шлём Юрию на согласование.
+    // Полный лонгрид пишется ТОЛЬКО после кнопки ✅ в боте.
+    const { generateOutline } = await import('../services/outline-generator.js');
+    const { notifyOutlineReady } = await import('../services/approval-notifier.js');
+    try {
+      const { outline } = await generateOutline({
+        summary: idea.summary,
+        painTag: idea.pain_tag,
+      });
+      await deps.pool.query(
+        `UPDATE ideas
+            SET longread_outline = $2::jsonb,
+                longread_title   = $3,
+                longread_code_word = $4,
+                status           = 'longread_outline_pending'
+          WHERE id = $1`,
+        [
+          idea.id,
+          JSON.stringify(outline.sections),
+          outline.title,
+          outline.codeWord,
+        ],
+      );
+      await notifyOutlineReady({ ideaId: idea.id }, { pool: deps.pool });
+      log.info({ ideaId: idea.id }, 'content-worker: outline sent for approval (strategy C)');
+      return {
+        status: 'skipped',
+        ideaId: idea.id,
+        strategy: 'C',
+        reason: 'longread outline sent to Telegram — awaiting Юрий approval',
+      };
+    } catch (err) {
+      log.error(
+        { err: (err as Error).message, ideaId: idea.id },
+        'content-worker: outline generation failed for strategy C',
+      );
+      throw err;
+    }
   }
 
   if (decision.bonusId) {

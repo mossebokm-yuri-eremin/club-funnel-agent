@@ -214,6 +214,141 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
     }
   });
 
+  // ---- callback_query: longread outline approval (AC-16) ----
+  bot.callbackQuery(
+    /^lr:(outline_approve|outline_regen|outline_cancel|draft_approve|draft_regen|draft_edit|draft_reject):([0-9a-f-]{36})$/,
+    async (ctx) => {
+      if (!isAuthorized(ctx, opts.allowedUserId) || !opts.pool) {
+        await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
+        return;
+      }
+      const action = ctx.match![1] as string;
+      const ideaId = ctx.match![2] as string;
+      try {
+        if (action === 'outline_approve') {
+          await opts.pool.query(
+            `UPDATE ideas SET status = 'longread_draft_pending' WHERE id = $1`,
+            [ideaId],
+          );
+          // Запускаем фабрику в фоне (через async — не блокируем callback).
+          await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+          await ctx.answerCallbackQuery({ text: '✅ Outline принят, пишу полный лонгрид (1-3 мин)…' });
+          (async () => {
+            try {
+              const { runLongreadDraft } = await import('../services/longread-runner.js');
+              await runLongreadDraft(opts.pool!, ideaId);
+              const { notifyLongreadDraftReady } = await import('../services/approval-notifier.js');
+              await notifyLongreadDraftReady({ ideaId }, { pool: opts.pool! });
+            } catch (err) {
+              log.error(
+                { err: (err as Error).message, ideaId },
+                'longread-runner: failed',
+              );
+            }
+          })();
+        } else if (action === 'outline_regen') {
+          const { generateOutline } = await import('../services/outline-generator.js');
+          const ir = await opts.pool.query(
+            `SELECT summary, pain_tag FROM ideas WHERE id = $1`,
+            [ideaId],
+          );
+          const r = ir.rows[0];
+          if (!r) {
+            await ctx.answerCallbackQuery({ text: 'idea not found' });
+            return;
+          }
+          const { outline } = await generateOutline({ summary: r.summary, painTag: r.pain_tag });
+          await opts.pool.query(
+            `UPDATE ideas SET longread_outline = $2::jsonb, longread_title = $3, longread_code_word = $4 WHERE id = $1`,
+            [ideaId, JSON.stringify(outline.sections), outline.title, outline.codeWord],
+          );
+          const { notifyOutlineReady } = await import('../services/approval-notifier.js');
+          await notifyOutlineReady({ ideaId }, { pool: opts.pool });
+          await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+          await ctx.answerCallbackQuery({ text: '🔄 Перегенерирую outline' });
+        } else if (action === 'outline_cancel') {
+          await opts.pool.query(
+            `UPDATE ideas SET status = 'longread_cancelled' WHERE id = $1`,
+            [ideaId],
+          );
+          await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+          await ctx.editMessageText('✖ Лонгрид отменён.').catch(() => {});
+          await ctx.answerCallbackQuery({ text: '✖ Отменён' });
+        } else if (action === 'draft_approve') {
+          // INSERT в bonus_library с placeholder pdf_url/gdrive_id (Phase 4 заполнит реально).
+          const ir = await opts.pool.query(
+            `SELECT longread_title, longread_outline, longread_draft_md, pain_tag
+               FROM ideas WHERE id = $1`,
+            [ideaId],
+          );
+          const r = ir.rows[0];
+          if (!r || !r.longread_draft_md) {
+            await ctx.answerCallbackQuery({ text: 'draft missing' });
+            return;
+          }
+          const wordCount = (r.longread_draft_md.match(/[\p{L}\p{N}]+/gu) ?? []).length;
+          const ins = await opts.pool.query<{ id: string }>(
+            `INSERT INTO bonus_library
+               (title, pain_tag, outline, body_md, pdf_url, pdf_gdrive_id, word_count, status, origin, source_idea_id)
+             VALUES ($1, $2, $3::jsonb, $4, '', '', $5, 'live', 'strategy_c', $6)
+             RETURNING id`,
+            [r.longread_title, r.pain_tag, JSON.stringify(r.longread_outline), r.longread_draft_md, wordCount, ideaId],
+          );
+          const bonusId = ins.rows[0]?.id;
+          await opts.pool.query(
+            `UPDATE ideas SET status = 'bonus_published', bonus_id = $2 WHERE id = $1`,
+            [ideaId, bonusId],
+          );
+          await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+          await ctx.answerCallbackQuery({ text: '✅ В библиотеке' });
+          await ctx.reply(
+            `✅ Лонгрид опубликован в bonus_library: \`${bonusId}\`\n` +
+              `Phase 4 добавит PDF + GDrive ссылку.`,
+            { parse_mode: 'Markdown' },
+          );
+          log.info({ ideaId, bonusId, wordCount }, 'longread: published to bonus_library');
+        } else if (action === 'draft_regen') {
+          await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+          await ctx.answerCallbackQuery({ text: '🔄 Перегенерирую…' });
+          (async () => {
+            try {
+              const { runLongreadDraft } = await import('../services/longread-runner.js');
+              await runLongreadDraft(opts.pool!, ideaId);
+              const { notifyLongreadDraftReady } = await import('../services/approval-notifier.js');
+              await notifyLongreadDraftReady({ ideaId }, { pool: opts.pool! });
+            } catch (err) {
+              log.error({ err: (err as Error).message, ideaId }, 'longread-regen: failed');
+            }
+          })();
+        } else if (action === 'draft_edit') {
+          // Используем edit-state в режиме longread.
+          const { setEditState } = await import('../services/edit-state.js');
+          // Для лонгрида префикс ставим 'lr:'+ideaId в pkgId (чтобы text-handler понял).
+          await setEditState(ctx.from!.id, `lr:${ideaId}`);
+          await ctx.answerCallbackQuery({ text: '✏️ Жду инструкцию' });
+          await ctx.reply(
+            `✏️ *Режим правки лонгрида* \`${ideaId.slice(0, 8)}\`.\n\nПиши что менять (текстом).`,
+            { parse_mode: 'Markdown' },
+          );
+        } else if (action === 'draft_reject') {
+          await opts.pool.query(
+            `UPDATE ideas SET status = 'longread_rejected' WHERE id = $1`,
+            [ideaId],
+          );
+          await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+          await ctx.editMessageText('✖ Лонгрид отклонён.').catch(() => {});
+          await ctx.answerCallbackQuery({ text: '✖ Отклонён' });
+        }
+      } catch (err) {
+        log.error(
+          { err: (err as Error).message, action, ideaId },
+          'longread-callback: failed',
+        );
+        await ctx.answerCallbackQuery({ text: 'Ошибка, смотри логи.' });
+      }
+    },
+  );
+
   // ---- voice / audio ----
   bot.on(['message:voice', 'message:audio'], async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserId)) {
@@ -267,6 +402,41 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
         const state = await getEditState(ctx.from!.id);
         if (state) {
           await clearEditState(ctx.from!.id);
+          // Longread edit-mode: pkg_id с префиксом 'lr:' → это idea, не content_package.
+          if (state.pkg_id.startsWith('lr:')) {
+            const ideaId = state.pkg_id.slice(3);
+            await ctx.reply(
+              `✏️ Принял инструкцию правки лонгрида: «${m.text.slice(0, 80)}». Регенерирую…`,
+              { parse_mode: 'Markdown' },
+            );
+            (async () => {
+              try {
+                // Простая стратегия: добавляем инструкцию в outline и перегенерим draft.
+                // Полноценный edit-pass через Claude — TODO P2.
+                await opts.pool!.query(
+                  `UPDATE ideas SET longread_outline = longread_outline || $2::jsonb WHERE id = $1`,
+                  [
+                    ideaId,
+                    JSON.stringify([
+                      { h2: 'USER_EDIT_INSTRUCTION', summary: m.text },
+                    ]),
+                  ],
+                );
+                const { runLongreadDraft } = await import('../services/longread-runner.js');
+                await runLongreadDraft(opts.pool!, ideaId);
+                const { notifyLongreadDraftReady } = await import(
+                  '../services/approval-notifier.js'
+                );
+                await notifyLongreadDraftReady({ ideaId }, { pool: opts.pool! });
+              } catch (err) {
+                log.error(
+                  { err: (err as Error).message, ideaId },
+                  'longread-edit: failed',
+                );
+              }
+            })();
+            return;
+          }
           await ctx.reply(
             `✏️ Принял инструкцию правки: «${m.text.slice(0, 80)}». Применяю к пакету \`${state.pkg_id.slice(0, 8)}\`…`,
             { parse_mode: 'Markdown' },
