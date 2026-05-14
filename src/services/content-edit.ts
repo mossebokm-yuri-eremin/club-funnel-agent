@@ -13,7 +13,6 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { callAnthropic } from '../integrations/anthropic.js';
 import { TWIN_YE_SYSTEM_PROMPT } from '../prompts/twin-ye.v1.js';
-import { TWIN_RZ_SYSTEM_PROMPT } from '../prompts/twin-rz.v1.js';
 import { validateVoice } from './voice-validator.js';
 import { log } from '../observability/logger.js';
 
