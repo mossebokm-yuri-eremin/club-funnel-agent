@@ -39,7 +39,26 @@ export function redisIdempotencyStore(redis: RedisLike): IdempotencyStore {
   };
 }
 
+// Поддерживаем два формата:
+//   1) Плоский x-www-form-urlencoded из GC UI (см. скриншот настроек):
+//      event, order_id, user_id, user_email, user_name, offer_id, offer_name,
+//      amount, paid_at, utm_source, utm_campaign, utm_content
+//   2) Старый вложенный JSON: { action, deal: { id, user: { email }, ... }, timestamp }
 export interface GetCourseDealPayload {
+  // --- плоский формат GC UI ---
+  event?: string;
+  order_id?: string | number;
+  user_id?: string | number;
+  user_email?: string;
+  user_name?: string;
+  offer_id?: string | number;
+  offer_name?: string;
+  amount?: string | number;
+  paid_at?: string;
+  utm_source?: string;
+  utm_campaign?: string;
+  utm_content?: string;
+  // --- старый вложенный формат (legacy) ---
   action?: string;
   deal?: {
     id?: string | number;
@@ -87,11 +106,23 @@ export function verifyHmac(rawBody: Buffer, signatureHeader: string | undefined,
 }
 
 export function eventIdFromPayload(payload: GetCourseDealPayload): string {
-  // Идемпотентность по бизнес-ключу: action + deal.id + timestamp.
-  // Если deal.id отсутствует — fallback на хеш всего тела (стабильность важнее красоты).
-  const action = payload.action ?? 'unknown';
-  const dealId = payload.deal?.id !== undefined ? String(payload.deal.id) : null;
-  const ts = payload.timestamp !== undefined ? String(payload.timestamp) : '0';
+  // Поддержка двух форматов GC payload:
+  //   - плоский (event, order_id) — из UI настроек webhook'a GetCourse
+  //   - вложенный (action, deal.id) — старый legacy
+  // Идемпотентность: event/action + order_id/deal.id + timestamp/paid_at.
+  const action = (payload.event ?? payload.action ?? 'unknown').toString();
+  const dealId =
+    payload.order_id !== undefined
+      ? String(payload.order_id)
+      : payload.deal?.id !== undefined
+        ? String(payload.deal.id)
+        : null;
+  const ts =
+    payload.paid_at !== undefined
+      ? String(payload.paid_at)
+      : payload.timestamp !== undefined
+        ? String(payload.timestamp)
+        : '0';
   if (dealId) return `${action}:${dealId}:${ts}`;
   const h = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
   return `${action}:noid:${h}`;
@@ -103,28 +134,51 @@ function getRawBody(req: FastifyRequest): Buffer | null {
   return null;
 }
 
-// Регистрирует content-type parser для application/json, сохраняющий raw body.
+// Регистрирует content-type parsers для application/json И application/x-www-form-urlencoded,
+// сохраняющие raw body для HMAC-проверки. GetCourse шлёт x-www-form-urlencoded (см. их UI
+// "Тело запроса"), Stripe-подобные интеграции — JSON. Поддерживаем оба.
 // Должен вызываться один раз на инстансе fastify (idempotent — повторный вызов
 // не падает, мы ловим исключение типа FST_ERR_CTP_ALREADY_PRESENT).
+function parseFormUrlEncoded(raw: Buffer): Record<string, string> {
+  const out: Record<string, string> = {};
+  const text = raw.toString('utf8');
+  if (!text) return out;
+  for (const pair of text.split('&')) {
+    if (!pair) continue;
+    const eq = pair.indexOf('=');
+    const rawKey = eq >= 0 ? pair.slice(0, eq) : pair;
+    const rawVal = eq >= 0 ? pair.slice(eq + 1) : '';
+    try {
+      const k = decodeURIComponent(rawKey.replace(/\+/g, ' '));
+      const v = decodeURIComponent(rawVal.replace(/\+/g, ' '));
+      out[k] = v;
+    } catch {
+      out[rawKey] = rawVal;
+    }
+  }
+  return out;
+}
+
 export function ensureRawBodyParser(app: FastifyInstance): void {
-  try {
-    app.addContentTypeParser(
-      'application/json',
-      { parseAs: 'buffer' },
-      (req, body, done) => {
+  const addParser = (mime: string, parser: (raw: Buffer) => unknown): void => {
+    try {
+      app.addContentTypeParser(mime, { parseAs: 'buffer' }, (req, body, done) => {
         (req as FastifyRequest & { rawBody?: Buffer }).rawBody = body as Buffer;
         try {
-          const parsed = (body as Buffer).length === 0 ? {} : JSON.parse((body as Buffer).toString('utf8'));
+          const parsed = (body as Buffer).length === 0 ? {} : parser(body as Buffer);
           done(null, parsed);
         } catch (err) {
           done(err as Error, undefined);
         }
-      },
-    );
-  } catch (err: unknown) {
-    const code = (err as { code?: string } | null)?.code;
-    if (code !== 'FST_ERR_CTP_ALREADY_PRESENT') throw err;
-  }
+      });
+    } catch (err: unknown) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code !== 'FST_ERR_CTP_ALREADY_PRESENT') throw err;
+    }
+  };
+
+  addParser('application/json', (raw) => JSON.parse(raw.toString('utf8')));
+  addParser('application/x-www-form-urlencoded', (raw) => parseFormUrlEncoded(raw));
 }
 
 export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhookOptions> = async (
