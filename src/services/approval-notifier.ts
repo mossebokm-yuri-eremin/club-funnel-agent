@@ -159,12 +159,12 @@ function buildApprovalKeyboard(pkgId: string): InlineKeyboard {
   return {
     inline_keyboard: [
       [
-        { text: '✅ Принять', callback_data: `cp:approve:${pkgId}` },
-        { text: '🔄 Переделать', callback_data: `cp:reject:${pkgId}` },
+        { text: '✅ Одобрить', callback_data: `cp:approve:${pkgId}` },
+        { text: '🔄 Перегенерировать', callback_data: `cp:regen:${pkgId}` },
       ],
       [
-        { text: '💬 Коммент', callback_data: `cp:comment:${pkgId}` },
-        { text: '❌ Отменить', callback_data: `cp:cancel:${pkgId}` },
+        { text: '✏️ Правка', callback_data: `cp:edit:${pkgId}` },
+        { text: '✖ Отклонить', callback_data: `cp:reject:${pkgId}` },
       ],
     ],
   };

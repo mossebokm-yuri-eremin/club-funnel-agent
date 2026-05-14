@@ -131,61 +131,79 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
     }
   });
 
-  // ---- callback_query: одобрение content_package ----
-  // Кнопки в approval-notifier: cp:approve|reject|comment|cancel:<UUID>
-  bot.callbackQuery(/^cp:(approve|reject|comment|cancel):([0-9a-f-]{36})$/, async (ctx) => {
+  // ---- callback_query: одобрение / regen / edit / reject content_package ----
+  // Кнопки в approval-notifier: cp:approve|regen|edit|reject:<UUID>
+  bot.callbackQuery(/^cp:(approve|regen|edit|reject):([0-9a-f-]{36})$/, async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserId)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized callback');
       await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
       return;
     }
     const m = ctx.match!;
-    const action = m[1] as 'approve' | 'reject' | 'comment' | 'cancel';
+    const action = m[1] as 'approve' | 'regen' | 'edit' | 'reject';
     const pkgId = m[2] as string;
     if (!opts.pool) {
       await ctx.answerCallbackQuery({ text: 'pool not wired' });
       return;
     }
     try {
-      if (action === 'approve' || action === 'reject' || action === 'cancel') {
+      if (action === 'approve' || action === 'reject') {
         const status = action === 'approve' ? 'approved' : 'rejected';
         await opts.pool.query(
           `UPDATE content_packages SET approval_status = $1, updated_at = NOW() WHERE id = $2`,
           [status, pkgId],
         );
-        const label =
-          action === 'approve'
-            ? '✅ Принято'
-            : action === 'reject'
-              ? '🔄 Переделать — пришли голосовое с правками'
-              : '❌ Отменено';
+        const label = action === 'approve' ? '✅ Одобрено' : '✖ Отклонено';
         await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
-        await ctx.editMessageText(
-          `✅ content_package_id: \`${pkgId}\`\n\n${label}`,
-          { parse_mode: 'Markdown' },
-        ).catch(() => {});
+        await ctx.editMessageText(`✅ content_package_id: \`${pkgId}\`\n\n${label}`, {
+          parse_mode: 'Markdown',
+        }).catch(() => {});
         await ctx.answerCallbackQuery({ text: label });
         log.info({ pkgId, action, status }, 'approval-callback: status updated');
-      } else if (action === 'comment') {
-        await ctx.answerCallbackQuery({
-          text: 'Жду текстовый комментарий следующим сообщением — добавлю в пакет.',
-          show_alert: false,
-        });
-        // Сохраним «жду коммент» через note: добавим в БД маркер;
-        // полноценный conversation flow — позже (AC-22).
-        await opts.pool.query(
-          `UPDATE content_packages
-              SET validator_report = COALESCE(validator_report, '{}'::jsonb)
-                                     || jsonb_build_object('awaiting_comment_at', NOW()),
-                  updated_at = NOW()
-            WHERE id = $1`,
+      } else if (action === 'regen') {
+        // Перегенерация — берём idea_id из пакета, ставим новый job в content_queue.
+        const ir = await opts.pool.query<{ idea_id: string }>(
+          `SELECT idea_id FROM content_packages WHERE id = $1`,
           [pkgId],
         );
+        const ideaId = ir.rows[0]?.idea_id;
+        if (!ideaId) {
+          await ctx.answerCallbackQuery({ text: 'package not found' });
+          return;
+        }
+        // Старый — superseded (reuse 'rejected' enum), новый сейчас встанет в очередь.
+        await opts.pool.query(
+          `UPDATE content_packages SET approval_status = 'rejected', updated_at = NOW() WHERE id = $1`,
+          [pkgId],
+        );
+        await opts.pool.query(`UPDATE ideas SET status = 'strategy_chosen' WHERE id = $1`, [ideaId]);
+        const { contentQueue } = await import('../jobs/queues.js');
+        const job = await contentQueue().add(
+          'gen',
+          { idea_id: ideaId },
+          { jobId: `regen-${pkgId}-${Date.now()}` },
+        );
+        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await ctx.editMessageText(
+          `🔄 Перегенерация: idea \`${ideaId.slice(0, 8)}\` → новый пакет на подходе (job ${job.id}).`,
+          { parse_mode: 'Markdown' },
+        ).catch(() => {});
+        await ctx.answerCallbackQuery({ text: '🔄 Перегенерация запущена' });
+        log.info({ pkgId, ideaId, newJobId: job.id }, 'approval-callback: regen enqueued');
+      } else if (action === 'edit') {
+        // Edit-mode: ставим Redis state, ждём следующее сообщение пользователя
+        // (текст или голос → STT-инструкция в Phase 8).
+        const { setEditState } = await import('../services/edit-state.js');
+        await setEditState(ctx.from!.id, pkgId);
+        await ctx.answerCallbackQuery({ text: '✏️ Жду инструкцию следующим сообщением' });
         await ctx.reply(
-          `💬 Жду твой комментарий следующим сообщением — приложу к пакету \`${pkgId.slice(0, 8)}\`.`,
+          `✏️ *Режим правки* для пакета \`${pkgId.slice(0, 8)}\`.\n\n` +
+            `Пиши следующим сообщением ЧТО менять: «короче на 30%», «жёстче, с провокацией», «убери первый абзац», «добавь кейс Ани».\n\n` +
+            `Следующее сообщение НЕ создаст новую идею — оно будет применено как правка. ` +
+            `Чтобы отменить — /style (или просто игнорируй, через 30 минут state протухнет).`,
           { parse_mode: 'Markdown' },
         );
-        log.info({ pkgId }, 'approval-callback: comment requested');
+        log.info({ pkgId, tgUserId: ctx.from!.id }, 'approval-callback: edit-mode armed');
       }
     } catch (err) {
       log.error(
@@ -241,6 +259,45 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
     // voice/audio уже обработаны выше; команды — тоже.
     if (m.voice || m.audio) return;
     if ((m.text ?? '').startsWith('/')) return;
+
+    // ---- edit-mode: если у юзера активен edit_state, текст — инструкция, не идея ----
+    if (m.text && m.text.trim().length > 0 && opts.pool) {
+      try {
+        const { getEditState, clearEditState } = await import('../services/edit-state.js');
+        const state = await getEditState(ctx.from!.id);
+        if (state) {
+          await clearEditState(ctx.from!.id);
+          await ctx.reply(
+            `✏️ Принял инструкцию правки: «${m.text.slice(0, 80)}». Применяю к пакету \`${state.pkg_id.slice(0, 8)}\`…`,
+            { parse_mode: 'Markdown' },
+          );
+          const { editContentPackage } = await import('../services/content-edit.js');
+          const r = await editContentPackage(opts.pool, {
+            pkgId: state.pkg_id,
+            instruction: m.text,
+            tgUserId: ctx.from!.id,
+          });
+          if (r.status === 'ok' && r.newPkgId) {
+            const { visualQueue } = await import('../jobs/queues.js');
+            await visualQueue().add(
+              'carousel',
+              { content_package_id: r.newPkgId },
+              { jobId: `edit-vis-${r.newPkgId}` },
+            );
+            await ctx.reply(
+              `✅ Правка применена. Новый пакет \`${r.newPkgId.slice(0, 8)}\` собирается, карусель и уведомление с кнопками придут отдельным сообщением.`,
+              { parse_mode: 'Markdown' },
+            );
+          } else {
+            await ctx.reply(`Не получилось применить правку: ${r.reason ?? 'unknown'}.`);
+          }
+          return;
+        }
+      } catch (err) {
+        log.error({ err: (err as Error).message }, 'edit-mode: failed');
+        // fallthrough — обрабатываем как обычный текст
+      }
+    }
 
     const detectable: DetectableMessage = toDetectable(m);
     const detection = detectReference(detectable);
