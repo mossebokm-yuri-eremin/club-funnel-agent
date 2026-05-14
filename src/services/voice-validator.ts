@@ -90,6 +90,20 @@ export const RZ_MARKERS: VoiceMarkers = {
 
 export const DEFAULT_MIN_DENSITY = 0.3; // markers per 100 words, см. SPEC AC-14
 
+// Sacred rule #11: цена клуба запрещена в контенте для холодной аудитории
+// (раскрывается только в письмах 7–8 прогрева и на лендинге GetCourse).
+// Паттерны ловят явное упоминание суммы / взноса, но НЕ статистику
+// («5000+ дизайнеров», «15 000 интерьеров» — нет валюты / «/мес», проходит).
+export const PRICE_PATTERNS: ReadonlyArray<{ marker: string; regex: RegExp }> = [
+  { marker: '5000 ₽/руб', regex: /\b5\s*000\s*[₽р]/iu },
+  { marker: '5000 руб', regex: /\b5\s*000\s*(?:руб|р\.)/iu },
+  { marker: '5к/мес', regex: /\b5\s*[кk]\s*[₽/]/iu },
+  { marker: '5к (в контексте цены)', regex: /\b5\s*[кk]\b(?=[^.]{0,40}(?:мес|месяц|клуб|реализ|взнос|оплат))/iu },
+  { marker: 'пять тысяч', regex: /\bпять\s+тысяч\b/iu },
+  { marker: 'N 000 ₽/мес', regex: /\b\d{1,2}\s*000\s*₽?\s*\/\s*мес/iu },
+  { marker: 'N 000 в мес', regex: /\b\d{1,2}\s*000\s*₽?\s*в\s*мес/iu },
+];
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -145,6 +159,20 @@ export function validateVoice(input: ValidateInput): VoiceValidatorReport {
     const positions = findAllOccurrences(normalized, normalize(marker));
     if (positions.length > 0) {
       violations.push({ marker, positions });
+    }
+  }
+
+  // Sacred rule #11: упоминание цены клуба в контенте — отбраковка.
+  for (const { marker, regex } of PRICE_PATTERNS) {
+    const positions: number[] = [];
+    const re = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : regex.flags + 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      positions.push(m.index);
+      if (m.index === re.lastIndex) re.lastIndex++;
+    }
+    if (positions.length > 0) {
+      violations.push({ marker: `цена клуба (sacred rule #11: ${marker})`, positions });
     }
   }
 
