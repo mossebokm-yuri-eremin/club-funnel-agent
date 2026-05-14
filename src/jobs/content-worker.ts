@@ -191,6 +191,12 @@ async function process(
     bonusTitle = row.rows[0]?.title ?? null;
   }
 
+  // Читаем стиль пользователя (/style command — Phase 7, Правка 5).
+  // Default — 'short'. tg_user_id берём из config (только YE использует бот).
+  const { getUserStyle } = await import('../services/user-preferences.js');
+  const { config: cfg } = await import('../config.js');
+  const style = await getUserStyle(deps.pool, cfg.YE_TG_USER_ID);
+
   const pkg = await generateContentPackage(
     {
       ideaId: idea.id,
@@ -199,6 +205,7 @@ async function process(
       strategy: decision.strategy,
       bonusTitle,
       codeWord: decision.strategy === 'B' ? null : codeWord,
+      style,
     },
     { pool: deps.pool },
   );

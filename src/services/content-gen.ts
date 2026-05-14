@@ -31,6 +31,11 @@ import {
 import type { Strategy } from './strategy-chooser.js';
 import { config } from '../config.js';
 import { log } from '../observability/logger.js';
+import {
+  styleInstructions,
+  DEFAULT_STYLE,
+  type ContentStyle,
+} from './user-preferences.js';
 
 export interface ContentGenInput {
   ideaId: string;
@@ -43,6 +48,8 @@ export interface ContentGenInput {
   codeWord: string | null;
   /** Опциональные few-shot примеры (выжимки из winning_patterns). */
   winningPatterns?: string[];
+  /** Стиль (длина) контента — /style команда в боте. Default short. */
+  style?: ContentStyle;
 }
 
 export interface GeneratedArtifact {
@@ -89,11 +96,14 @@ interface ArtifactSpec {
 }
 
 function buildUserPrompt(spec: ArtifactSpec, input: ContentGenInput): string {
+  const style = input.style ?? DEFAULT_STYLE;
+  const styleHint = styleInstructions(style);
   const parts: string[] = [];
   parts.push(`ЗАДАЧА: ${describeKind(spec.kind)}.`);
   parts.push(`Идея: ${input.summary}`);
   parts.push(`Боль аудитории: ${input.painTag}`);
   parts.push(`Стратегия воронки: ${input.strategy}`);
+  parts.push(`СТИЛЬ ДЛИНЫ: ${styleHint.promptHint}`);
   if (input.bonusTitle) {
     parts.push(`Лонгрид: «${input.bonusTitle}»`);
   }

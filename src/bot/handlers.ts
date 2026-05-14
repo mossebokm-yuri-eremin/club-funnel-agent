@@ -65,6 +65,49 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
     await ctx.reply(HELP);
   });
 
+  // ---- /style ----
+  // /style short | normal | detailed — переключает длину контента (user_preferences).
+  bot.command('style', async (ctx) => {
+    if (!isAuthorized(ctx, opts.allowedUserId)) {
+      log.warn({ from: ctx.from?.id }, 'unauthorized: /style');
+      return;
+    }
+    const arg = (ctx.match ?? '').toString().trim().toLowerCase();
+    if (!opts.pool) {
+      await ctx.reply('Стили доступны после следующего рестарта (pool not wired).');
+      return;
+    }
+    const { isValidStyle, setUserStyle, getUserStyle } = await import(
+      '../services/user-preferences.js'
+    );
+    if (!arg) {
+      const current = await getUserStyle(opts.pool, ctx.from!.id);
+      await ctx.reply(
+        `Текущий стиль: *${current}*\n\n` +
+          `Доступно:\n` +
+          `• /style short — коротко (TG 150–250 слов, Reels ≤80, слайды 1 предложение)\n` +
+          `• /style normal — средне (TG 300–500 слов)\n` +
+          `• /style detailed — подробно (TG 500–800 слов)`,
+        { parse_mode: 'Markdown' },
+      );
+      return;
+    }
+    if (!isValidStyle(arg)) {
+      await ctx.reply(`Не понял. Доступно: short | normal | detailed.`);
+      return;
+    }
+    try {
+      await setUserStyle(opts.pool, ctx.from!.id, arg);
+      log.info({ tg_user_id: ctx.from!.id, style: arg }, 'style: updated');
+      await ctx.reply(`✅ Стиль контента установлен: *${arg}*. Применится со следующего голосового.`, {
+        parse_mode: 'Markdown',
+      });
+    } catch (err) {
+      log.error({ err: (err as Error).message }, '/style: persist failed');
+      await ctx.reply('Не смог сохранить стиль, посмотри логи.');
+    }
+  });
+
   // ---- /status ----
   bot.command('status', async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserId)) {
