@@ -3,7 +3,11 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastif
 import { log } from '../observability/logger.js';
 
 // Заголовок подписи: SPEC §9.4 → 'x-gc-signature' (lower-case в fastify).
-export const GC_SIGNATURE_HEADER = 'x-gc-signature';
+// HTTP-заголовки case-insensitive; Fastify нормализует к lowercase.
+// В ТЗ для подрядчика — X-GetCourse-Signature (см. docs/tz-getcourse-webhook.md).
+export const GC_SIGNATURE_HEADER = 'x-getcourse-signature';
+// Старое имя оставляем как fallback на случай, если подрядчик уже настроил с ним.
+export const GC_SIGNATURE_HEADER_LEGACY = 'x-gc-signature';
 // TTL для ключей идемпотентности: 7 дней. GetCourse может ретраить webhook
 // несколько раз; 7 суток — с запасом перекрывает SLA и pull-reconcile.
 // TODO confirm with Yuri: уточнить SLA ретраев GC.
@@ -140,7 +144,7 @@ export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhook
       return reply.code(400).send({ error: 'missing_body' });
     }
 
-    const sig = req.headers[GC_SIGNATURE_HEADER];
+    const sig = req.headers[GC_SIGNATURE_HEADER] ?? req.headers[GC_SIGNATURE_HEADER_LEGACY];
     const sigStr = Array.isArray(sig) ? sig[0] : sig;
 
     if (!verifyHmac(raw, sigStr, opts.secret)) {
