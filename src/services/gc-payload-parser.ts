@@ -28,6 +28,22 @@ export function rublesToKopecks(v: unknown): number {
   return Math.round(n * 100);
 }
 
+/**
+ * Эвристика суммы: если число большое (>= 10000) и без дробной части —
+ * предполагаем что уже копейки (GC иногда шлёт `cost_money` так).
+ * Иначе считаем рублями и умножаем на 100.
+ */
+export function smartAmountToKopecks(v: unknown): number {
+  if (v === undefined || v === null || v === '') return 0;
+  const str = typeof v === 'string' ? v.trim() : String(v);
+  const hasFraction = /[.,]\d/.test(str);
+  const n = typeof v === 'number' ? v : Number(str.replace(',', '.'));
+  if (!Number.isFinite(n)) return 0;
+  // С точкой = рубли (5000.00) → ×100. Целое >=10000 = подозрительно много для RUB → возможно копейки.
+  if (!hasFraction && n >= 10000 && Number.isInteger(n)) return Math.round(n);
+  return Math.round(n * 100);
+}
+
 function pickString(obj: Record<string, unknown>, keys: readonly string[]): string | null {
   for (const k of keys) {
     const v = obj[k];
@@ -130,13 +146,17 @@ export function parseGcPayload(raw: unknown): GcParsedPayment {
     'order_offer_name',
   ]) ?? pickString(orderObj, ['offer_name', 'product_name']);
 
-  const amountRub = pickNumber(obj, [
-    'payment_amount',
-    'amount',
-    'order_amount',
-    'total',
-    'sum',
-  ]) ?? pickNumber(deal, ['amount']) ?? pickNumber(orderObj, ['amount', 'total']);
+  // Сырое значение суммы (может быть рубли или копейки — определяем эвристикой ниже).
+  const amountRaw =
+    obj['payment_amount'] ??
+    obj['amount'] ??
+    obj['cost_money'] ??
+    obj['order_amount'] ??
+    obj['total'] ??
+    obj['sum'] ??
+    (deal as Record<string, unknown>)['amount'] ??
+    (orderObj as Record<string, unknown>)['amount'] ??
+    (orderObj as Record<string, unknown>)['total'];
 
   const currency =
     pickString(obj, ['payment_currency', 'currency']) ??
@@ -174,7 +194,7 @@ export function parseGcPayload(raw: unknown): GcParsedPayment {
     pickString(obj, ['utm_content']) ?? pickString(dealUtm, ['utm_content', 'content']);
 
   const hasAnyField = Boolean(
-    paymentId || productId || amountRub || userEmail || userId || event !== 'unknown',
+    paymentId || productId || amountRaw !== undefined || userEmail || userId || event !== 'unknown',
   );
 
   return {
@@ -183,7 +203,7 @@ export function parseGcPayload(raw: unknown): GcParsedPayment {
     paymentId,
     productId,
     productName,
-    amountKopecks: rublesToKopecks(amountRub),
+    amountKopecks: smartAmountToKopecks(amountRaw),
     currency,
     paidAt,
     userId,

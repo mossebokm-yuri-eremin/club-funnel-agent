@@ -24,6 +24,19 @@ export interface GcParserDeps {
 interface RawEventRow {
   id: string;
   raw_payload: unknown;
+  query_params: unknown;
+  body_parsed: unknown;
+}
+
+/** Объединяет query_params + body_parsed + raw_payload (legacy) в один объект для парсера. */
+function mergeForParse(row: RawEventRow): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const src of [row.query_params, row.body_parsed, row.raw_payload]) {
+    if (src && typeof src === 'object' && !Array.isArray(src)) {
+      Object.assign(out, src as Record<string, unknown>);
+    }
+  }
+  return out;
 }
 
 export function createGetCourseParserWorker(deps: GcParserDeps): Worker {
@@ -58,9 +71,21 @@ export async function scheduleGetCourseParserCron(): Promise<void> {
   }
 }
 
+/** Сбросить parse_status='pending' для одной записи (для /admin/getcourse/retry/:id). */
+export async function retryOneEvent(pool: Pool, id: string | number): Promise<boolean> {
+  const r = await pool.query(
+    `UPDATE getcourse_raw_events
+        SET parse_status = 'pending', parse_error = NULL, parsed_at = NULL
+      WHERE id = $1
+      RETURNING id`,
+    [id],
+  );
+  return r.rowCount === 1;
+}
+
 async function processBatch(deps: GcParserDeps): Promise<{ processed: number; club_purchases: number }> {
   const rowsRes = await deps.pool.query<RawEventRow>(
-    `SELECT id, raw_payload
+    `SELECT id, raw_payload, query_params, body_parsed
        FROM getcourse_raw_events
       WHERE parse_status = 'pending'
       ORDER BY received_at ASC
@@ -73,7 +98,8 @@ async function processBatch(deps: GcParserDeps): Promise<{ processed: number; cl
 
   for (const row of rowsRes.rows) {
     try {
-      const parsed = parseGcPayload(row.raw_payload);
+      const merged = mergeForParse(row);
+      const parsed = parseGcPayload(merged);
 
       if (parsed.empty) {
         await deps.pool.query(
@@ -132,9 +158,10 @@ async function processBatch(deps: GcParserDeps): Promise<{ processed: number; cl
                 parsed_event_type = $2,
                 parsed_user_email = $3,
                 parsed_amount_kopecks = $4,
+                parsed_order_id = $5,
                 parsed_at = NOW()
           WHERE id = $1`,
-        [row.id, parsed.eventType, parsed.userEmail, parsed.amountKopecks],
+        [row.id, parsed.eventType, parsed.userEmail, parsed.amountKopecks, parsed.paymentId],
       );
 
       // Если оплата клуба — шлём Telegram уведомление Юрию.

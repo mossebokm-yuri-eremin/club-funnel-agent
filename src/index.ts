@@ -77,26 +77,61 @@ async function buildHttpServer(): Promise<FastifyInstance> {
     pool,
   });
 
-  // Admin: последние raw events GetCourse (для диагностики). Bearer = TEST_ENDPOINT_TOKEN.
-  app.get('/admin/getcourse/recent', async (req, reply) => {
+  // Admin: GetCourse debug endpoints. Bearer = TEST_ENDPOINT_TOKEN.
+  const requireAdminAuth = (req: { headers: Record<string, unknown> }): boolean => {
     const token = config.TEST_ENDPOINT_TOKEN;
     const auth = (req.headers['authorization'] ?? '') as string;
-    if (!token || auth !== `Bearer ${token}`) {
+    return Boolean(token) && auth === `Bearer ${token}`;
+  };
+
+  app.get('/admin/getcourse/recent', async (req, reply) => {
+    if (!requireAdminAuth(req)) {
       reply.code(401);
       return { error: 'unauthorized' };
     }
     const limitRaw = (req.query as { limit?: string } | undefined)?.limit;
     const limit = Math.min(Math.max(parseInt(limitRaw ?? '20', 10) || 20, 1), 100);
     const r = await pool.query(
-      `SELECT id, received_at, ip_address, hmac_valid, content_type,
+      `SELECT id, received_at, request_method, request_path, ip_address, user_agent,
+              hmac_valid, content_type, query_params, body_parsed, body_raw,
               parse_status, parse_error, parsed_event_type, parsed_user_email,
-              parsed_amount_kopecks, raw_payload, headers
+              parsed_amount_kopecks, parsed_order_id, notified_at, headers
          FROM getcourse_raw_events
         ORDER BY received_at DESC
         LIMIT $1`,
       [limit],
     );
     return { count: r.rows.length, events: r.rows };
+  });
+
+  app.get<{ Params: { id: string } }>('/admin/getcourse/event/:id', async (req, reply) => {
+    if (!requireAdminAuth(req)) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    const r = await pool.query(
+      `SELECT * FROM getcourse_raw_events WHERE id = $1`,
+      [req.params.id],
+    );
+    if (r.rows.length === 0) {
+      reply.code(404);
+      return { error: 'not_found' };
+    }
+    return r.rows[0];
+  });
+
+  app.post<{ Params: { id: string } }>('/admin/getcourse/retry/:id', async (req, reply) => {
+    if (!requireAdminAuth(req)) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    const { retryOneEvent } = await import('./jobs/getcourse-parser-worker.js');
+    const ok = await retryOneEvent(pool, req.params.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: 'not_found' };
+    }
+    return { id: req.params.id, status: 'requeued (parse_status=pending)' };
   });
 
   return app;

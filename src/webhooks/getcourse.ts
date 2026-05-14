@@ -1,40 +1,38 @@
-// GetCourse webhook — raw-events буфер.
+// GetCourse webhook — raw-events буфер с поддержкой GET и POST.
 //
-// Логика (по решению Юрия 2026-05-14):
-//   1. Принимаем ЛЮБОЙ POST на /webhook/getcourse (JSON или x-www-form-urlencoded).
-//   2. Сохраняем raw_payload + headers + IP в таблицу getcourse_raw_events.
-//   3. Всегда отвечаем 200 OK — GetCourse ответ не парсит, retry'ить нам не нужно.
-//   4. HMAC опционален: если подпись пришла — валидируем и пишем hmac_valid=true/false,
-//      если не пришла — hmac_valid=NULL (warning в логи, но не отказываем).
-//   5. Парсинг → getcourse-parser-worker.ts (раз в 10 сек) → subscribers + Telegram notify.
+// АРХИТЕКТУРА (по решению Юрия 2026-05-14, после изучения доков GetCourse):
+//   • GetCourse по умолчанию шлёт GET с query-string (НЕ POST с JSON).
+//   • POST с JSON / x-www-form-urlencoded — тоже поддерживаем.
+//   • Имена полей в payload — какие выставит подрядчик в админке.
+//   • Мы ВСЕГДА отвечаем 200 OK с пустым body. GetCourse статус не парсит.
+//   • Любой запрос → INSERT в getcourse_raw_events.
+//   • Парсинг → getcourse-parser-worker (раз в 10 сек) → subscribers + Telegram notify.
 //
-// Sacred (CLAUDE.md §4): деньги в копейках (integer × 100), float — запрещены.
+// HMAC: ВРЕМЕННО отключён до подтверждения формата от подрядчика. Если заголовок
+// X-GetCourse-Signature пришёл — пишем hmac_valid=true/false в БД, но не отказываем.
+// Если не пришёл — hmac_valid=NULL.
 
 import crypto from 'node:crypto';
 import type { Pool } from 'pg';
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { log } from '../observability/logger.js';
 
-// Заголовки подписи (case-insensitive в Fastify → lowercase).
 export const GC_SIGNATURE_HEADER = 'x-getcourse-signature';
 export const GC_SIGNATURE_HEADER_LEGACY = 'x-gc-signature';
 
 export interface RegisterGetCourseWebhookOptions {
-  /** HMAC-секрет. Если опциональный (подрядчик не настроил) — НЕ отбраковываем. */
   secret: string;
-  /** PG pool — нужен чтобы писать в getcourse_raw_events. */
   pool: Pool;
   route?: string;
 }
 
-// HMAC-SHA256 hex. Возвращает true / false / null (null = заголовка не было).
+/** Возвращает true/false/null (null = заголовка нет). НЕ блокирует приём. */
 export function verifyHmac(
   rawBody: Buffer,
   signatureHeader: string | undefined,
   secret: string,
 ): boolean | null {
-  if (!signatureHeader) return null;
-  if (!secret) return null;
+  if (!signatureHeader || !secret) return null;
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
   const got = signatureHeader.trim().toLowerCase();
   if (expected.length !== got.length) return false;
@@ -45,7 +43,7 @@ export function verifyHmac(
   }
 }
 
-// --- raw body parser (json + form-urlencoded) --------------------------------
+// --- Body parsers ------------------------------------------------------------
 
 function parseFormUrlEncoded(raw: Buffer): Record<string, string> {
   const out: Record<string, string> = {};
@@ -94,7 +92,7 @@ function getRawBody(req: FastifyRequest): Buffer | null {
   return null;
 }
 
-// --- plugin ------------------------------------------------------------------
+// --- Plugin ------------------------------------------------------------------
 
 export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhookOptions> = async (
   app,
@@ -103,70 +101,92 @@ export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhook
   const route = opts.route ?? '/webhook/getcourse';
   ensureRawBodyParser(app);
 
-  app.post(route, async (req, reply) => {
-    const raw = getRawBody(req);
+  // Общий handler для GET и POST.
+  const handleEvent = async (req: FastifyRequest, method: 'GET' | 'POST'): Promise<void> => {
     const contentType = (req.headers['content-type'] ?? null) as string | null;
     const ip = req.ip;
+    const userAgent = (req.headers['user-agent'] ?? null) as string | null;
+    const requestPath = req.url ?? route;
 
-    // 1) HMAC статус (опциональный — null если не прислали).
+    // 1) query_params — для GET (основной канал) или для POST с query.
+    const queryParams =
+      typeof req.query === 'object' && req.query !== null
+        ? (req.query as Record<string, unknown>)
+        : null;
+
+    // 2) body_raw + body_parsed — только для POST.
+    const rawBuf = method === 'POST' ? getRawBody(req) : null;
+    const bodyRaw = rawBuf ? rawBuf.toString('utf8') : null;
+    const bodyParsed = method === 'POST' ? (req.body ?? null) : null;
+
+    // 3) HMAC опционально (временно — до подтверждения формата от GC).
     const sig =
       req.headers[GC_SIGNATURE_HEADER] ?? req.headers[GC_SIGNATURE_HEADER_LEGACY];
     const sigStr = Array.isArray(sig) ? sig[0] : sig;
-    const hmacValid = raw ? verifyHmac(raw, sigStr, opts.secret) : null;
-    if (hmacValid === null && sigStr === undefined) {
-      log.warn({ ip }, 'gc-webhook: no signature header — accepting anyway');
-    } else if (hmacValid === false) {
-      log.warn(
-        { ip, hasHeader: Boolean(sigStr) },
-        'gc-webhook: HMAC validation FAILED — saving event but mark as untrusted',
-      );
-    }
+    const hmacValid = rawBuf ? verifyHmac(rawBuf, sigStr, opts.secret) : null;
 
-    // 2) payload — берём parsed (req.body) если есть, иначе пробуем raw.toString.
-    let payload: unknown = req.body;
-    if (payload === undefined || payload === null || payload === '') {
-      payload = raw ? raw.toString('utf8') : null;
-    }
-    // jsonb не примет undefined/null; сохраним пустой объект если пусто.
-    const payloadForDb = payload === null || payload === undefined ? {} : payload;
-
-    // 3) headers — сохраняем все, для аудита.
+    // 4) headers (с маской авторизации).
     const safeHeaders: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(req.headers)) {
-      // Авторизационные значения — маскируем (можем подтянуть из raw event при необходимости).
-      if (k === 'authorization' || k === 'x-api-key') {
+      if (k === 'authorization' || k === 'x-api-key' || k === 'cookie') {
         safeHeaders[k] = typeof v === 'string' ? `${v.slice(0, 12)}…(redacted)` : v;
       } else {
         safeHeaders[k] = v;
       }
     }
 
-    // 4) INSERT raw event.
+    // 5) INSERT raw event.
     try {
       const r = await opts.pool.query<{ id: string }>(
         `INSERT INTO getcourse_raw_events
-            (raw_payload, headers, ip_address, hmac_valid, content_type, parse_status)
-          VALUES ($1::jsonb, $2::jsonb, $3, $4, $5, 'pending')
+            (request_method, request_path, query_params, body_raw, body_parsed,
+             raw_payload, headers, ip_address, user_agent, hmac_valid, content_type, parse_status)
+          VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, 'pending')
           RETURNING id`,
         [
-          JSON.stringify(payloadForDb),
+          method,
+          requestPath,
+          queryParams ? JSON.stringify(queryParams) : null,
+          bodyRaw,
+          bodyParsed !== null && bodyParsed !== undefined ? JSON.stringify(bodyParsed) : null,
+          // raw_payload (legacy NOT NULL — пишем то же что и body_parsed для совместимости с 006)
+          JSON.stringify(bodyParsed ?? queryParams ?? {}),
           JSON.stringify(safeHeaders),
           ip,
+          userAgent,
           hmacValid,
           contentType,
         ],
       );
       log.info(
-        { id: r.rows[0]?.id, hmacValid, contentType, ip },
-        'gc-webhook: raw event saved (pending parse)',
+        {
+          id: r.rows[0]?.id,
+          method,
+          contentType,
+          hmacValid,
+          ip,
+          hasQuery: queryParams ? Object.keys(queryParams).length : 0,
+          hasBody: bodyRaw ? bodyRaw.length : 0,
+        },
+        'gc-webhook: raw event saved',
       );
     } catch (err) {
-      log.error({ err: (err as Error).message, ip }, 'gc-webhook: failed to insert raw event');
-      // ВСЁ РАВНО возвращаем 200 — GC retry не нужен, событие потеряно (отдельный alert).
+      log.error(
+        { err: (err as Error).message, method, ip },
+        'gc-webhook: failed to insert raw event',
+      );
     }
+  };
 
-    return reply.code(200).send({ status: 'received' });
+  app.get(route, async (req, reply) => {
+    await handleEvent(req, 'GET');
+    return reply.code(200).send();
   });
 
-  log.info({ route }, 'gc-webhook: route registered (raw-events buffer)');
+  app.post(route, async (req, reply) => {
+    await handleEvent(req, 'POST');
+    return reply.code(200).send();
+  });
+
+  log.info({ route }, 'gc-webhook: route registered (GET+POST raw-events buffer)');
 };
