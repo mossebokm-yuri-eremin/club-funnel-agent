@@ -58,6 +58,17 @@ const ConfigSchema = z.object({
     .string()
     .default('false')
     .transform((v) => v === 'true' || v === '1'),
+  /**
+   * При true рендерим карусели из SVG-шаблонов MOSSEBO (assets/carousel-templates/)
+   * вместо AI-картинок Nano Banana. Подходит когда:
+   *   • Gemini billing pending, ИЛИ
+   *   • хочется быстрых брендированных слайдов без расходов на AI.
+   * Если флаг не задан, шаблоны используются автоматически когда включён PLACEHOLDER_MODE.
+   */
+  CAROUSEL_USE_TEMPLATES: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
 
   // --- Deepgram ---
   DEEPGRAM_API_KEY: z.string().optional(),

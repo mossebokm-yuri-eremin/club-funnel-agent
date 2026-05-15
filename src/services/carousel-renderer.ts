@@ -121,10 +121,35 @@ export async function renderCarousel(
     if (input.styleHint) promptInput.styleHint = input.styleHint;
     const prompt = buildCarouselSlidePrompt(promptInput);
 
-    // 1) Nano Banana → сырой PNG
-    const imgOut = await generateImageFn({ prompt, aspectRatio: '4:5' });
+    // 1) Источник PNG: либо Nano Banana (AI), либо SVG-шаблон MOSSEBO.
+    // Шаблон используется когда:
+    //   • CAROUSEL_USE_TEMPLATES=true (явно), ИЛИ
+    //   • PLACEHOLDER_MODE=true и нет AI-картинок (Gemini billing pending).
+    // Шаблон даёт читаемый брендированный слайд без зависимости от Gemini.
+    const { config: cfg } = await import('../config.js');
+    const useTemplates =
+      cfg.CAROUSEL_USE_TEMPLATES === true || cfg.NANO_BANANA_PLACEHOLDER_MODE === true;
+
+    let composedPng: Buffer;
+    if (useTemplates) {
+      const { renderTemplateSlide, pickTemplateForSlide } = await import(
+        './carousel-template-renderer.js'
+      );
+      const tmpl = pickTemplateForSlide(slideIndex, totalSlides);
+      const tplOut = await renderTemplateSlide({
+        template: tmpl,
+        text: slideText,
+        slideIndex,
+        totalSlides,
+        kicker: idea.pain_tag ? idea.pain_tag.toUpperCase().slice(0, 28) : 'РЕАЛИЗАЦИЯ',
+      });
+      composedPng = tplOut.png;
+    } else {
+      const imgOut = await generateImageFn({ prompt, aspectRatio: '4:5' });
+      composedPng = imgOut.png;
+    }
     // 2) Sharp 1080×1350 + watermark → JPG (SPEC AC-21)
-    const composed = await composeFn({ png: imgOut.png });
+    const composed = await composeFn({ png: composedPng });
     // 3) Upload → Cloudinary | local
     const uploaded = await uploadFn({
       jpg: composed.jpg,
