@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350">
+  <!-- Брендинг MOSSEBO. CTA (финальный слайд карусели). -->
+  <defs>
+    <linearGradient id="ctaBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff7518"/>
+      <stop offset="100%" stop-color="#e85a00"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1350" fill="url(#ctaBg)"/>
+
+  <!-- Декоративная белая полоска сверху -->
+  <rect x="80" y="120" width="80" height="8" fill="#ffffff" rx="4" opacity="0.85"/>
+
+  <text x="180" y="142"
+        font-family="Inter, -apple-system, sans-serif"
+        font-weight="700" font-size="22" fill="#ffffff" letter-spacing="3" opacity="0.85">ХОД ТВОЙ</text>
+
+  <!-- CTA-текст -->
+  <foreignObject x="80" y="340" width="920" height="700">
+    <div xmlns="http://www.w3.org/1999/xhtml"
+         style="
+           font-family: Inter, -apple-system, 'SF Pro Display', sans-serif;
+           font-weight: 800;
+           font-size: 78px;
+           line-height: 1.08;
+           letter-spacing: -0.02em;
+           color: #ffffff;
+           word-wrap: break-word;
+           white-space: pre-wrap;
+         ">{{TEXT}}</div>
+  </foreignObject>
+
+  <!-- Подпись + клуб -->
+  <text x="80" y="1220"
+        font-family="Inter, -apple-system, sans-serif"
+        font-weight="700" font-size="36" fill="#2C2826">Юрий Еремин</text>
+  <text x="80" y="1260"
+        font-family="Inter, -apple-system, sans-serif"
+        font-weight="500" font-size="24" fill="#2C2826" opacity="0.75">наставник дизайнеров · клуб «Реализация»</text>
+  <text x="80" y="1310"
+        font-family="Inter, -apple-system, sans-serif"
+        font-weight="600" font-size="22" fill="#ffffff">@yury_eremin</text>
+</svg>

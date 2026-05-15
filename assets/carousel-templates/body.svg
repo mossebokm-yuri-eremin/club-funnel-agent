@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350">
+  <!-- Брендинг MOSSEBO. Body (текстовый слайд карусели). -->
+  <rect width="1080" height="1350" fill="#dfdbd8"/>
+
+  <!-- Декоративная оранжевая вертикаль слева -->
+  <rect x="80" y="160" width="6" height="120" fill="#ff7518" rx="3"/>
+
+  <!-- Slide number (1 / 10) -->
+  <text x="120" y="200"
+        font-family="Inter, -apple-system, 'SF Pro Display', sans-serif"
+        font-weight="800" font-size="32" fill="#2C2826">{{INDEX}}</text>
+  <text x="120" y="240"
+        font-family="Inter, -apple-system, sans-serif"
+        font-weight="500" font-size="20" fill="#2C2826" opacity="0.55"
+        letter-spacing="2">из {{TOTAL}}</text>
+
+  <!-- Основной текст слайда -->
+  <foreignObject x="80" y="340" width="920" height="780">
+    <div xmlns="http://www.w3.org/1999/xhtml"
+         style="
+           font-family: Inter, -apple-system, 'SF Pro Display', sans-serif;
+           font-weight: 600;
+           font-size: 56px;
+           line-height: 1.18;
+           letter-spacing: -0.01em;
+           color: #2C2826;
+           word-wrap: break-word;
+           white-space: pre-wrap;
+         ">{{TEXT}}</div>
+  </foreignObject>
+
+  <!-- Footer brand bar -->
+  <rect x="0" y="1280" width="1080" height="70" fill="#2C2826"/>
+  <text x="80" y="1325"
+        font-family="Inter, -apple-system, sans-serif"
+        font-weight="600" font-size="24" fill="#dfdbd8">@yury_eremin</text>
+  <text x="1000" y="1325" text-anchor="end"
+        font-family="Inter, -apple-system, sans-serif"
+        font-weight="600" font-size="24" fill="#ff7518">клуб «Реализация»</text>
+</svg>
