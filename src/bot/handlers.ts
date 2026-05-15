@@ -65,6 +65,36 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
     await ctx.reply(HELP);
   });
 
+  // ---- /refresh_kb ----
+  // Пересчитывает эмбеддинги knowledge_embeddings после обновления MD-файлов в knowledge/.
+  bot.command('refresh_kb', async (ctx) => {
+    if (!isAuthorized(ctx, opts.allowedUserId)) {
+      log.warn({ from: ctx.from?.id }, 'unauthorized: /refresh_kb');
+      return;
+    }
+    if (!opts.pool) {
+      await ctx.reply('pool not wired');
+      return;
+    }
+    await ctx.reply('🔄 Пересчитываю эмбеддинги knowledge base, подожди 30-60 сек…');
+    try {
+      const { refreshKnowledgeEmbeddings } = await import('../services/knowledge-loader.js');
+      const res = await refreshKnowledgeEmbeddings(opts.pool);
+      await ctx.reply(
+        `✅ Готово.\n` +
+          `Всего чанков: ${res.total}\n` +
+          `Заново эмбеддено: ${res.embedded}\n` +
+          `Без изменений (hash совпал): ${res.skipped}\n` +
+          `Удалено осиротевших: ${res.removed}`,
+      );
+      log.info(res, 'refresh_kb: done');
+    } catch (err) {
+      const msg = (err as Error).message;
+      log.error({ err: msg }, '/refresh_kb: failed');
+      await ctx.reply(`❌ Не удалось пересчитать: ${msg.slice(0, 200)}`);
+    }
+  });
+
   // ---- /style ----
   // /style short | normal | detailed — переключает длину контента (user_preferences).
   bot.command('style', async (ctx) => {

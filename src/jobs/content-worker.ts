@@ -226,6 +226,48 @@ async function process(
   const { config: cfg } = await import('../config.js');
   const style = await getUserStyle(deps.pool, cfg.YE_TG_USER_ID);
 
+  // Knowledge base: релевантные выдержки + winning patterns (Phase 7, Блок 1).
+  // Подгружаем "best effort" — если KB пустая или OpenAI недоступен, продолжаем.
+  let kbExcerpts = '';
+  let winningPatternsText = '';
+  try {
+    const { findRelevantKbChunks, formatKbExcerpts } = await import(
+      '../services/knowledge-loader.js'
+    );
+    const query = [idea.summary, idea.pain_tag].filter(Boolean).join('\n');
+    const hits = await findRelevantKbChunks(deps.pool, query, 5);
+    kbExcerpts = formatKbExcerpts(hits);
+    if (hits.length > 0) {
+      log.info(
+        { ideaId: idea.id, hits: hits.length, topSim: hits[0]?.similarity?.toFixed(2) },
+        'content-worker: KB excerpts loaded',
+      );
+    }
+  } catch (err) {
+    log.warn(
+      { err: (err as Error).message },
+      'content-worker: KB excerpts failed (continuing without)',
+    );
+  }
+  try {
+    const { getLastWinningPatterns, formatWinningPatterns } = await import(
+      '../services/winning-patterns.js'
+    );
+    const patterns = await getLastWinningPatterns(deps.pool, {
+      pain: idea.pain_tag,
+      limit: 3,
+    });
+    winningPatternsText = formatWinningPatterns(patterns);
+    if (patterns.length > 0) {
+      log.info({ ideaId: idea.id, patterns: patterns.length }, 'content-worker: winning patterns loaded');
+    }
+  } catch (err) {
+    log.warn(
+      { err: (err as Error).message },
+      'content-worker: winning patterns failed (continuing without)',
+    );
+  }
+
   const pkg = await generateContentPackage(
     {
       ideaId: idea.id,
@@ -235,6 +277,8 @@ async function process(
       bonusTitle,
       codeWord: decision.strategy === 'B' ? null : codeWord,
       style,
+      kbExcerpts,
+      winningPatternsText,
     },
     { pool: deps.pool },
   );

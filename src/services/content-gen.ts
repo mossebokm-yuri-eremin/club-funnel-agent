@@ -36,6 +36,8 @@ import {
   DEFAULT_STYLE,
   type ContentStyle,
 } from './user-preferences.js';
+import { findRelevantKbChunks, formatKbExcerpts } from './knowledge-loader.js';
+import { getLastWinningPatterns, formatWinningPatterns } from './winning-patterns.js';
 
 export interface ContentGenInput {
   ideaId: string;
@@ -50,6 +52,10 @@ export interface ContentGenInput {
   winningPatterns?: string[];
   /** Стиль (длина) контента — /style команда в боте. Default short. */
   style?: ContentStyle;
+  /** Релевантные выдержки из KB (knowledge_embeddings, semantic search). */
+  kbExcerpts?: string;
+  /** Открытия предыдущих одобренных пакетов как few-shot. */
+  winningPatternsText?: string;
 }
 
 export interface GeneratedArtifact {
@@ -118,6 +124,13 @@ function buildUserPrompt(spec: ArtifactSpec, input: ContentGenInput): string {
     for (const w of input.winningPatterns.slice(0, 3)) {
       parts.push(`  • ${w}`);
     }
+  }
+  // Knowledge base — реальные цитаты/кейсы Юрия (Phase 7+). Снимает "общность" текстов.
+  if (input.kbExcerpts && input.kbExcerpts.trim()) {
+    parts.push('\n' + input.kbExcerpts);
+  }
+  if (input.winningPatternsText && input.winningPatternsText.trim()) {
+    parts.push('\n' + input.winningPatternsText);
   }
   if (spec.expectJson) {
     parts.push(
