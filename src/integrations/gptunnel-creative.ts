@@ -10,7 +10,8 @@
 // Seedream плохо умеет кириллицу — текст НЕ передаём в prompt,
 // Sharp накладывает текст поверх готовой картинки (см. carousel-renderer).
 
-import { fetch as undiciFetch } from 'undici';
+// Используем встроенный Node 22 fetch (без undici-deps).
+// GPTunnel в РФ — прокси не нужен, dispatcher тоже.
 import { config } from '../config.js';
 import { log } from '../observability/logger.js';
 
@@ -106,7 +107,7 @@ export async function generateGptunnelImage(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const res = await undiciFetch(`${BASE_URL}/generate`, {
+      const res = await fetch(`${BASE_URL}/generate`, {
         method: 'POST',
         headers: {
           // ВАЖНО: GPTunnel требует чистый токен, БЕЗ префикса 'Bearer'.
@@ -190,7 +191,7 @@ export async function generateGptunnelImage(
 /** Скачивает картинку по URL (Seedream живёт 24h — надо забрать сразу после generateImage). */
 export async function downloadGptunnelImage(imageUrl: string): Promise<Buffer> {
   const startedAt = Date.now();
-  const res = await undiciFetch(imageUrl, { method: 'GET' });
+  const res = await fetch(imageUrl, { method: 'GET' });
   if (!res.ok) {
     throw new Error(`gptunnel download HTTP ${res.status}: ${imageUrl.slice(0, 80)}`);
   }

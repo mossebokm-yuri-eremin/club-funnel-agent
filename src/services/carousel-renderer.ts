@@ -121,17 +121,63 @@ export async function renderCarousel(
     if (input.styleHint) promptInput.styleHint = input.styleHint;
     const prompt = buildCarouselSlidePrompt(promptInput);
 
-    // 1) Источник PNG: либо Nano Banana (AI), либо SVG-шаблон MOSSEBO.
-    // Шаблон используется когда:
-    //   • CAROUSEL_USE_TEMPLATES=true (явно), ИЛИ
-    //   • PLACEHOLDER_MODE=true и нет AI-картинок (Gemini billing pending).
-    // Шаблон даёт читаемый брендированный слайд без зависимости от Gemini.
+    // 1) Источник картинки слайда. Маршрутизация по IMAGE_PROVIDER:
+    //   • 'gptunnel'    (default) — Seedream-4 через GPTunnel + Sharp text-overlay
+    //   • 'template'    — SVG-шаблоны без AI (Phase 7 Блок 2)
+    //   • 'placeholder' — серый PNG (smoke)
+    //   • 'gemini'      — Nano Banana (legacy, оставлен переключаемым)
+    // CAROUSEL_USE_TEMPLATES=true ИЛИ NANO_BANANA_PLACEHOLDER_MODE=true
+    // переопределяют выбор на template (backward compat).
     const { config: cfg } = await import('../config.js');
-    const useTemplates =
+    const forceTemplate =
       cfg.CAROUSEL_USE_TEMPLATES === true || cfg.NANO_BANANA_PLACEHOLDER_MODE === true;
+    const provider = forceTemplate ? 'template' : cfg.IMAGE_PROVIDER;
 
-    let composedPng: Buffer;
-    if (useTemplates) {
+    let finalJpg: Buffer;
+    let composedMeta: { bytes: number };
+
+    if (provider === 'gptunnel') {
+      // GPTunnel Seedream-4: визуальная концепция без текста → Sharp накладывает русский.
+      const { generateGptunnelImage, downloadGptunnelImage } = await import(
+        '../integrations/gptunnel-creative.js'
+      );
+      const { buildSeedreamVisualPrompt } = await import(
+        '../prompts/carousel-image.v1.js'
+      );
+      const { overlayTextOnImage } = await import('./text-overlay.js');
+      const visualPrompt = buildSeedreamVisualPrompt({
+        slideText,
+        slideIndex,
+        totalSlides,
+        painTag: idea.pain_tag ?? '',
+      });
+      const gen = await generateGptunnelImage({
+        prompt: visualPrompt,
+        aspectRatio: '9:16',
+        size: '2K',
+      });
+      const rawPng = await downloadGptunnelImage(gen.imageUrl);
+      const overlay = await overlayTextOnImage({
+        imageBuffer: rawPng,
+        text: slideText,
+        slideIndex,
+        totalSlides,
+        painTag: idea.pain_tag ?? undefined,
+      });
+      finalJpg = overlay.jpg;
+      composedMeta = { bytes: overlay.bytes };
+      log.info(
+        {
+          contentPackageId: pkg.id,
+          slideIndex,
+          costRub: gen.costRub,
+          costKopecks: gen.costKopecks,
+          generationId: gen.generationId,
+          duration_ms: gen.durationMs,
+        },
+        'carousel-renderer: gptunnel slide rendered',
+      );
+    } else if (provider === 'template') {
       const { renderTemplateSlide, pickTemplateForSlide } = await import(
         './carousel-template-renderer.js'
       );
@@ -143,13 +189,20 @@ export async function renderCarousel(
         totalSlides,
         kicker: idea.pain_tag ? idea.pain_tag.toUpperCase().slice(0, 28) : 'РЕАЛИЗАЦИЯ',
       });
-      composedPng = tplOut.png;
+      const composed = await composeFn({ png: tplOut.png });
+      finalJpg = composed.jpg;
+      composedMeta = { bytes: composed.meta.bytes };
     } else {
+      // Legacy: Gemini Nano Banana / placeholder.
       const imgOut = await generateImageFn({ prompt, aspectRatio: '4:5' });
-      composedPng = imgOut.png;
+      const composed = await composeFn({ png: imgOut.png });
+      finalJpg = composed.jpg;
+      composedMeta = { bytes: composed.meta.bytes };
     }
-    // 2) Sharp 1080×1350 + watermark → JPG (SPEC AC-21)
-    const composed = await composeFn({ png: composedPng });
+
+    // 2) Готовый JPG (text-overlay уже сделал 1080×1350 для GPTunnel,
+    //    composeFn — для template/gemini).
+    const composed = { jpg: finalJpg, meta: composedMeta };
     // 3) Upload → Cloudinary | local
     const uploaded = await uploadFn({
       jpg: composed.jpg,

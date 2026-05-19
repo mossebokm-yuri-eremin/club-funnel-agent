@@ -1,13 +1,16 @@
-// Промпты для Nano Banana Pro / Gemini 3 Pro Image — генерация слайдов карусели
-// в стиле бренда MOSSEBO Production / клуб «Реализация».
+// Промпты для генерации картинок слайдов карусели через AI-провайдер
+// (seedream-4 GPTunnel — primary; Nano Banana — fallback если когда-то заработает).
 //
-// Брендовая палитра (зафиксировано Юрием):
+// Брендовая палитра клуба «Реализация»:
 //   - #ff7518 — основной акцент (оранжевый, «энергия реализации»)
 //   - #2C2826 — графит (фон / текст-выноска)
 //   - #dfdbd8 — тёплый бежевый (поддерживающий фон, бумага)
 //
 // Никаких УТП / «преимуществ» — только смыслы и образы боли/мечты ЦА.
 // Стиль: чистый минимализм + типографика, не stock-photography, не AI-плакаты.
+//
+// Seedream-4 плохо умеет кириллицу — текст слайда НЕ передаётся в prompt.
+// Sharp наносит текст поверх готовой картинки (см. carousel-renderer).
 
 export const BRAND_COLORS = {
   primary: '#ff7518',
@@ -82,7 +85,7 @@ export function buildLongreadCoverPrompt(input: {
   painTag: string;
 }): string {
   return [
-    'Создай обложку лонгрида (4:5, 1080×1350) в стиле бренда MOSSEBO Production.',
+    `Создай обложку лонгрида (4:5, 1080×1350) для премиум-клуба дизайнеров «Реализация».`,
     '',
     `ЗАГОЛОВОК (крупно, в две строки): «${input.title.trim()}»`,
     '',
@@ -101,4 +104,66 @@ export function buildLongreadCoverPrompt(input: {
     '',
     'ЗАПРЕЩЕНО: лица, руки, стоковые иллюстрации, AI-аватары, чужие логотипы.',
   ].join('\n');
+}
+
+/**
+ * Промпт для Seedream-4 (GPTunnel): английский, без текста слайда внутри.
+ * Sharp потом наложит русский текст поверх — Seedream плохо умеет кириллицу.
+ *
+ * Возвращает ВИЗУАЛЬНУЮ КОНЦЕПЦИЮ — что должно быть на фото (минималистичное,
+ * editorial, premium), без слов «УТП», без брендов, без лиц/рук.
+ */
+export interface SeedreamVisualConceptInput {
+  /** Текст слайда — даём ТОЛЬКО для смысловой подсказки модели, в prompt не вставляем. */
+  slideText: string;
+  slideIndex: number;
+  totalSlides: number;
+  painTag: string;
+}
+
+export function buildSeedreamVisualPrompt(input: SeedreamVisualConceptInput): string {
+  const isCover = input.slideIndex === 1;
+  const isClosing = input.slideIndex === input.totalSlides;
+  // Английский, чтобы Seedream хорошо понял style. Текст слайда наносится Sharp поверх.
+  const role = isCover
+    ? 'opening cover slide of an Instagram carousel — strong visual hook with negative space at top for headline overlay'
+    : isClosing
+      ? 'closing slide of an Instagram carousel — calming finale with negative space for CTA overlay'
+      : 'middle slide of a carousel — supporting illustration with negative space for body-text overlay';
+  // Метафоры по pain_tag — лёгкие подсказки, не директивные.
+  const painHint = mapPainToVisualHint(input.painTag);
+  return [
+    'Premium minimalist editorial photography, 9:16 vertical, magazine-quality.',
+    `Role: ${role}.`,
+    `Visual metaphor hint: ${painHint}.`,
+    'Composition: clean, lots of negative space (especially at top OR bottom — leave 40% empty for text overlay).',
+    'Color palette: warm orange #ff7518 accent, graphite #2C2826, warm beige paper #dfdbd8, off-white.',
+    'Light: soft warm directional light, no harsh shadows, golden-hour or soft window light.',
+    'Texture: paper, linen, matte ceramic, weathered wood — tactile editorial feel.',
+    'Style references: Kinfolk magazine, Cereal magazine, The New Yorker photo essays.',
+    '',
+    'STRICT RULES:',
+    '- NO text, NO letters, NO typography, NO words in any language.',
+    '- NO logos, NO watermarks, NO brand marks.',
+    '- NO human faces, NO hands, NO people (silhouettes acceptable only as extreme background).',
+    '- NO AI-generated avatars, NO clip-art, NO stock-photo cliché.',
+    '- NO bright saturated colors outside the palette.',
+    '- Photorealistic editorial, not illustration.',
+  ].join('\n');
+}
+
+function mapPainToVisualHint(painTag: string): string {
+  const t = painTag.toLowerCase();
+  if (t.includes('pricing') || t.includes('price') || t.includes('cena'))
+    return 'a single object on a clean surface — symbolizing worth without showing money';
+  if (t.includes('burnout') || t.includes('time'))
+    return 'an empty workspace at dawn — exhaustion without depicting tired faces';
+  if (t.includes('content') || t.includes('reels'))
+    return 'a camera or notebook left on a table — content silence';
+  if (t.includes('brand') || t.includes('public'))
+    return 'a closed door with warm light leaking — restraint before stepping out';
+  if (t.includes('product'))
+    return 'pristine architectural detail — quiet confidence of finished work';
+  // Default — нейтральная editorial композиция.
+  return 'an architectural detail or designed object on warm surface — quiet confidence';
 }
