@@ -234,6 +234,40 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
         }).catch(() => {});
         await ctx.answerCallbackQuery({ text: label.slice(0, 64) });
         log.info({ pkgId, action, status }, 'approval-callback: status updated');
+
+        // AC-27: на approve — активируем воронку (генерим code_word,
+        // создаём ChatPlace scenario, INSERT в funnels). Асинхронно,
+        // чтобы не блокировать UI ответ.
+        if (action === 'approve' && ideaIdForLog) {
+          (async () => {
+            try {
+              const { activateFunnelOnApprove } = await import(
+                '../services/funnel-activator.js'
+              );
+              const r = await activateFunnelOnApprove(opts.pool!, {
+                ideaId: ideaIdForLog,
+                contentPackageId: pkgId,
+              });
+              if (r) {
+                await ctx.reply(
+                  `🔗 Воронка активирована\n` +
+                    `code_word: \`${r.codeWord}\`\n` +
+                    `funnel_id: \`${r.funnelId.slice(0, 8)}\`\n` +
+                    `ChatPlace: ${r.chatplaceAutomationId ? '✅ ' + r.chatplaceAutomationId.slice(0, 12) : '⚠️ pending'}`,
+                  { parse_mode: 'Markdown' },
+                );
+              }
+            } catch (err) {
+              log.error(
+                { err: (err as Error).message, pkgId, ideaId: ideaIdForLog },
+                'approval-callback: funnel-activator failed (non-fatal)',
+              );
+              await ctx.reply(
+                `⚠️ Воронка не активирована: ${(err as Error).message.slice(0, 200)}`,
+              ).catch(() => {});
+            }
+          })();
+        }
       } else if (action === 'regen') {
         // Перегенерация — берём idea_id из пакета, ставим новый job в content_queue.
         const ir = await opts.pool.query<{ idea_id: string }>(
