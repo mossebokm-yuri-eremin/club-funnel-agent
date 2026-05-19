@@ -51,12 +51,106 @@ function isAuthorized(ctx: Context, allowedUserId: number): boolean {
 
 export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void {
   // ---- /start ----
+  // Two режима:
+  //   1. /start без параметра — это сам Юрий (greeting).
+  //   2. /start <code_word> — это лид, пришёл по deep-link из ChatPlace воронки.
+  //      Регистрируем subscriber, ставим warmup-цепочку (AC-28), шлём greeting.
   bot.command('start', async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
-      log.warn({ from: ctx.from?.id }, 'unauthorized sender: /start');
+    const payload = (ctx.match ?? '').toString().trim();
+    const fromId = ctx.from?.id;
+    if (!fromId) return;
+
+    // Сценарий 1: сам Юрий или admin без payload
+    if (!payload) {
+      if (isAuthorized(ctx, opts.allowedUserId)) {
+        await ctx.reply(GREETING);
+        return;
+      }
+      // Незнакомый юзер без payload — даём вежливый ответ, не блокируем.
+      await ctx.reply(
+        'Привет. Я бот клуба «Реализация» Юрия Еремина.\n\n' +
+          'Если ты пришёл по ссылке из Instagram/Direct — нажми её ещё раз, она содержит код воронки.',
+      );
       return;
     }
-    await ctx.reply(GREETING);
+
+    // Сценарий 2: payload = code_word воронки. Регистрируем подписчика + цепочка.
+    if (!opts.pool) {
+      log.warn({}, '/start with payload: pool not wired');
+      return;
+    }
+    try {
+      const codeWord = payload.toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 60);
+      if (!codeWord) {
+        await ctx.reply('Не понял код воронки. Попробуй ещё раз по той же ссылке.');
+        return;
+      }
+
+      // 1. Ищем funnel.
+      const fRes = await opts.pool.query<{ id: string; code_word: string; bonus_id: string | null }>(
+        `SELECT id, code_word, bonus_id FROM funnels
+          WHERE code_word = $1 AND status = 'live' LIMIT 1`,
+        [codeWord],
+      );
+      const funnel = fRes.rows[0];
+      if (!funnel) {
+        log.warn({ codeWord, fromId }, '/start: unknown code_word');
+        await ctx.reply(
+          'Привет! Этот код воронки уже не активен. Напиши Юрию в Instagram — отправит свежий.',
+        );
+        return;
+      }
+
+      // 2. Upsert subscriber (по tg_user_id).
+      const subRes = await opts.pool.query<{ id: string; status: string }>(
+        `INSERT INTO subscribers (tg_user_id, status, last_seen_at)
+           VALUES ($1, 'warming', NOW())
+         ON CONFLICT (tg_user_id) WHERE tg_user_id IS NOT NULL AND deleted_at IS NULL
+           DO UPDATE SET last_seen_at = NOW(),
+                         status = CASE WHEN subscribers.status = 'lead' THEN 'warming' ELSE subscribers.status END
+         RETURNING id, status`,
+        [fromId],
+      );
+      const subscriberId = subRes.rows[0]!.id;
+
+      // 3. trackEvent: direct_received (метрика — лид дошёл до бота).
+      const { trackEvent } = await import('../services/funnel.js');
+      await trackEvent(
+        {
+          subscriberId,
+          funnelId: funnel.id,
+          codeWord: funnel.code_word,
+          eventCode: 'direct_received',
+          source: 'tg_bot',
+          idempotencyKey: `start:${subscriberId}:${funnel.id}`,
+        },
+        { pool: opts.pool },
+      );
+
+      // 4. Создаём warmup-цепочку (idempotent — повторный /start не дублирует).
+      const { scheduleWarmupChain } = await import('../services/warmup-scheduler.js');
+      const wm = await scheduleWarmupChain(opts.pool, {
+        subscriberId,
+        funnelId: funnel.id,
+        codeWord: funnel.code_word,
+        chainType: 'short',
+      });
+
+      // 5. Greeting (первое сообщение warmup отправит worker через ≤5 мин).
+      await ctx.reply(
+        `Привет! Это бот клуба «Реализация».\n\n` +
+          (wm.alreadyExisted
+            ? `Ты уже в цепочке прогрева — следующее сообщение пришлю по расписанию.`
+            : `Через минуту начну рассказывать про клуб. Всего 3 сообщения за 3 дня — без спама.`),
+      );
+      log.info(
+        { fromId, subscriberId, funnelId: funnel.id, codeWord, ...wm },
+        '/start: lead registered + warmup scheduled',
+      );
+    } catch (err) {
+      log.error({ err: (err as Error).message, fromId, payload }, '/start handler failed');
+      await ctx.reply('Что-то пошло не так. Напиши Юрию в Instagram, разберёмся.');
+    }
   });
 
   // ---- /help ----

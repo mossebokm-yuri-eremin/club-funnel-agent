@@ -19,6 +19,7 @@ export const QUEUE_NAMES = {
   FUNNEL: 'funnel_queue',
   GETCOURSE_PULL: 'getcourse_pull_queue',
   GETCOURSE_PARSE: 'getcourse_parse_queue',
+  WARMUP: 'warmup_queue',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -221,6 +222,19 @@ export function getCourseParseQueue(): Queue<Record<string, never>> {
   return _gcParse;
 }
 
+let _warmup: Queue<Record<string, never>> | null = null;
+export function warmupQueue(): Queue<Record<string, never>> {
+  if (!_warmup) {
+    _warmup = buildQueue<Record<string, never>>(QUEUE_NAMES.WARMUP, {
+      ...DEFAULT_JOB_OPTIONS,
+      attempts: 1,
+      removeOnComplete: { age: 3600, count: 100 },
+      removeOnFail: { age: 24 * 3600, count: 50 },
+    });
+  }
+  return _warmup;
+}
+
 export async function closeAllQueues(): Promise<void> {
   const all: Queue[] = [];
   if (_audio) all.push(_audio);
@@ -232,6 +246,7 @@ export async function closeAllQueues(): Promise<void> {
   if (_funnel) all.push(_funnel);
   if (_gcPull) all.push(_gcPull);
   if (_gcParse) all.push(_gcParse);
+  if (_warmup) all.push(_warmup);
   await Promise.allSettled(all.map((q) => q.close()));
   _audio = null;
   _refDl = null;
@@ -242,4 +257,5 @@ export async function closeAllQueues(): Promise<void> {
   _funnel = null;
   _gcPull = null;
   _gcParse = null;
+  _warmup = null;
 }

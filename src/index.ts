@@ -18,6 +18,10 @@ import {
   createGetCourseParserWorker,
   scheduleGetCourseParserCron,
 } from './jobs/getcourse-parser-worker.js';
+import {
+  createWarmupSenderWorker,
+  scheduleWarmupSenderCron,
+} from './jobs/warmup-sender-worker.js';
 import type { Bot } from 'grammy';
 
 interface Shutdownable {
@@ -162,6 +166,9 @@ function buildBotWorkers(bot: Bot): Shutdownable[] {
   }
   // GetCourse raw-events parser (всегда включён — недорогой polling каждые 10s).
   workers.push(createGetCourseParserWorker({ pool }));
+  // Warmup sender (cron каждые 5 мин) — отправляет прогревочные сообщения по
+  // warmup_messages WHERE status='pending' AND scheduled_at <= NOW().
+  workers.push(createWarmupSenderWorker({ pool }));
   return workers;
 }
 
@@ -235,6 +242,13 @@ async function main(): Promise<void> {
     await scheduleGetCourseParserCron();
   } catch (err) {
     log.warn({ err }, 'gc-parser cron: failed to schedule (continuing)');
+  }
+
+  // Cron: warmup sender (каждые 5 мин — AC-28 + AC-30 long chain).
+  try {
+    await scheduleWarmupSenderCron();
+  } catch (err) {
+    log.warn({ err }, 'warmup-sender cron: failed to schedule (continuing)');
   }
 
   await app.listen({ host: config.APP_HOST, port: config.APP_PORT });
