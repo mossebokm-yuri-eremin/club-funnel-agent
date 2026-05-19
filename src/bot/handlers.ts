@@ -204,12 +204,24 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
       return;
     }
     try {
+      const { recordApproval, ideaIdForPackage } = await import('../services/approval-log.js');
+      const ideaIdForLog = await ideaIdForPackage(opts.pool, pkgId);
+
       if (action === 'approve' || action === 'reject') {
         const status = action === 'approve' ? 'approved' : 'rejected';
         await opts.pool.query(
           `UPDATE content_packages SET approval_status = $1, updated_at = NOW() WHERE id = $2`,
           [status, pkgId],
         );
+        // AC-24: записываем в approval_log для retrain.
+        if (ideaIdForLog) {
+          await recordApproval(opts.pool, {
+            ideaId: ideaIdForLog,
+            artifactType: 'content_package',
+            action: action === 'approve' ? 'approved' : 'cancelled',
+            voiceCode: 'YE',
+          });
+        }
         // После ✅ — карусель остаётся в чате с пометкой "Готово к публикации".
         // Юрий публикует сам или пересылает Анне вручную. ANNA_TG_CHAT_ID не используем.
         const label =
@@ -239,6 +251,14 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
           [pkgId],
         );
         await opts.pool.query(`UPDATE ideas SET status = 'strategy_chosen' WHERE id = $1`, [ideaId]);
+        // AC-24: regen = rejected с пометкой в approval_log.
+        await recordApproval(opts.pool, {
+          ideaId,
+          artifactType: 'content_package',
+          action: 'rejected',
+          voiceCode: 'YE',
+          comment: 'regenerate requested via 🔁 button',
+        });
         const { contentQueue } = await import('../jobs/queues.js');
         const job = await contentQueue().add(
           'gen',
@@ -257,6 +277,16 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
         // (текст или голос → STT-инструкция в Phase 8).
         const { setEditState } = await import('../services/edit-state.js');
         await setEditState(ctx.from!.id, pkgId);
+        // AC-24: edit armed = commented (комментарий придёт следующим сообщением).
+        if (ideaIdForLog) {
+          await recordApproval(opts.pool, {
+            ideaId: ideaIdForLog,
+            artifactType: 'content_package',
+            action: 'commented',
+            voiceCode: 'YE',
+            comment: '✏️ edit mode armed — awaiting instruction',
+          });
+        }
         await ctx.answerCallbackQuery({ text: '✏️ Жду инструкцию следующим сообщением' });
         await ctx.reply(
           `✏️ *Режим правки* для пакета \`${pkgId.slice(0, 8)}\`.\n\n` +
@@ -286,6 +316,18 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
       }
       const action = ctx.match![1] as string;
       const ideaId = ctx.match![2] as string;
+      const { recordApproval } = await import('../services/approval-log.js');
+      // Маппинг lr-action → approval_log.action + artifact_type.
+      const logMap: Record<string, { artifactType: 'longread_outline' | 'longread_draft'; act: 'approved' | 'rejected' | 'commented' | 'cancelled'; comment?: string }> = {
+        outline_approve: { artifactType: 'longread_outline', act: 'approved' },
+        outline_regen: { artifactType: 'longread_outline', act: 'rejected', comment: 'regenerate outline' },
+        outline_cancel: { artifactType: 'longread_outline', act: 'cancelled' },
+        draft_approve: { artifactType: 'longread_draft', act: 'approved' },
+        draft_regen: { artifactType: 'longread_draft', act: 'rejected', comment: 'regenerate draft' },
+        draft_edit: { artifactType: 'longread_draft', act: 'commented', comment: '✏️ edit mode armed' },
+        draft_reject: { artifactType: 'longread_draft', act: 'cancelled' },
+      };
+      const logSpec = logMap[action];
       try {
         if (action === 'outline_approve') {
           await opts.pool.query(
@@ -400,6 +442,15 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
           await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
           await ctx.editMessageText('✖ Лонгрид отклонён.').catch(() => {});
           await ctx.answerCallbackQuery({ text: '✖ Отклонён' });
+        }
+        // AC-24: запись в approval_log для retrain.
+        if (logSpec) {
+          await recordApproval(opts.pool, {
+            ideaId,
+            artifactType: logSpec.artifactType,
+            action: logSpec.act,
+            ...(logSpec.comment ? { comment: logSpec.comment } : {}),
+          });
         }
       } catch (err) {
         log.error(
