@@ -69,6 +69,12 @@ const ConfigSchema = z.object({
     .string()
     .default('false')
     .transform((v) => v === 'true' || v === '1'),
+  /**
+   * TTL кэша SVG-шаблонов каруселей (секунды). После истечения agent перечитывает
+   * шаблоны из GDrive (если GDRIVE_CAROUSEL_TEMPLATES_FOLDER_ID задан).
+   * Default 300с = 5 мин. /refresh_templates сбрасывает кэш вручную.
+   */
+  CAROUSEL_TEMPLATES_TTL_S: intNum.default(300),
 
   // --- Deepgram ---
   DEEPGRAM_API_KEY: z.string().optional(),

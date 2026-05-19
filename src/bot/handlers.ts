@@ -40,7 +40,10 @@ const HELP =
   'Что умею:\n' +
   '— голосовое → расшифрую и сделаю идею;\n' +
   '— пересланный Reels/пост из Instagram → возьму как референс, жду голос с углом;\n' +
-  '— /status — что сейчас в работе.';
+  '— /status — что сейчас в работе;\n' +
+  '— /refresh_kb — пересчитать эмбеддинги knowledge base;\n' +
+  '— /refresh_templates — перечитать SVG-шаблоны каруселей из GDrive;\n' +
+  '— /style short|normal|detailed — длина контента.';
 
 function isAuthorized(ctx: Context, allowedUserId: number): boolean {
   return ctx.from?.id === allowedUserId;
@@ -92,6 +95,30 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
       const msg = (err as Error).message;
       log.error({ err: msg }, '/refresh_kb: failed');
       await ctx.reply(`❌ Не удалось пересчитать: ${msg.slice(0, 200)}`);
+    }
+  });
+
+  // ---- /refresh_templates ----
+  // Сбрасывает in-memory кэш SVG-шаблонов каруселей. После запуска следующая
+  // карусель перечитает шаблоны из GDrive (GDRIVE_CAROUSEL_TEMPLATES_FOLDER_ID).
+  // Нужно после ручной правки шаблонов в GDrive без ожидания TTL.
+  bot.command('refresh_templates', async (ctx) => {
+    if (!isAuthorized(ctx, opts.allowedUserId)) {
+      log.warn({ from: ctx.from?.id }, 'unauthorized: /refresh_templates');
+      return;
+    }
+    try {
+      const { clearTemplateCache } = await import('../services/carousel-template-renderer.js');
+      clearTemplateCache();
+      await ctx.reply(
+        '✅ Кэш шаблонов сброшен.\n' +
+          'Следующая карусель загрузит свежие SVG из GDrive (или из assets/, если папка не задана).',
+      );
+      log.info({ from: ctx.from?.id }, '/refresh_templates: cache cleared');
+    } catch (err) {
+      const msg = (err as Error).message;
+      log.error({ err: msg }, '/refresh_templates: failed');
+      await ctx.reply(`❌ Не удалось сбросить: ${msg.slice(0, 200)}`);
     }
   });
 
