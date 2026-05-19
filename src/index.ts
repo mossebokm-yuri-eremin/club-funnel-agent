@@ -42,6 +42,44 @@ async function buildHttpServer(): Promise<FastifyInstance> {
 
   // Diagnostic: тест прокси и Nano Banana. Auth — Bearer token из TEST_ENDPOINT_TOKEN.
   // Возвращает first-100-bytes от ответа Gemini, чтобы понять что приходит.
+  // Diagnostic: тест GPTunnel Creative (seedream-4 / 8₽). Bearer = TEST_ENDPOINT_TOKEN.
+  // POST body: { prompt: string, aspectRatio?: '9:16'|'1:1'|... , size?: '1K'|'2K' }
+  app.post('/test/gptunnel-image', async (req, reply) => {
+    const token = config.TEST_ENDPOINT_TOKEN;
+    const auth = (req.headers['authorization'] ?? '') as string;
+    if (!token || auth !== `Bearer ${token}`) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    try {
+      const { generateGptunnelImage } = await import('./integrations/gptunnel-creative.js');
+      const body = (req.body ?? {}) as {
+        prompt?: string;
+        aspectRatio?: string;
+        size?: string;
+      };
+      const result = await generateGptunnelImage({
+        prompt:
+          body.prompt ??
+          'Premium minimalist editorial photography. Soft warm light. Clean composition. No text. No logos.',
+        aspectRatio: (body.aspectRatio as '9:16' | '1:1' | '4:3' | '3:4' | undefined) ?? '9:16',
+        size: (body.size as '1K' | '2K' | '3K' | '4K' | undefined) ?? '2K',
+      });
+      return {
+        ok: true,
+        imageUrl: result.imageUrl,
+        costRub: result.costRub,
+        costKopecks: result.costKopecks,
+        generationId: result.generationId,
+        modelUsed: result.modelUsed,
+        durationMs: result.durationMs,
+      };
+    } catch (err) {
+      reply.code(502);
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
   app.post('/test/image-gen', async (req, reply) => {
     const token = config.TEST_ENDPOINT_TOKEN;
     const auth = (req.headers['authorization'] ?? '') as string;

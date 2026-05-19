@@ -43,6 +43,14 @@ const ConfigSchema = z.object({
 
   // --- Google AI ---
   GEMINI_API_KEY: z.string().optional(),
+  /** GPTunnel Creative Lab — российский провайдер (seedream-4 / flux / imagine). */
+  GPTUNNEL_API_KEY: z.string().optional(),
+  /** Какой провайдер использовать для генерации картинок каруселей.
+   *  'gptunnel' (default) — seedream-4 через российский агрегатор (8₽/картинка).
+   *  'gemini' — Nano Banana через прокси (если будет настроен billing).
+   *  'placeholder' — серый PNG (smoke / без AI).
+   *  'template' — SVG-шаблоны без AI-картинок (CAROUSEL_USE_TEMPLATES). */
+  IMAGE_PROVIDER: z.enum(['gptunnel', 'gemini', 'placeholder', 'template']).default('gptunnel'),
   /**
    * HTTPS-прокси для запросов к Gemini API (РФ-VPS → Netherlands прокси).
    * Формат: `http://login:pass@host:port`. Пусто = без прокси (для локального dev).
