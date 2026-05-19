@@ -33,6 +33,7 @@ pnpm-lock.yaml.bak
 .vscode/
 .idea/
 *.swp
+*.code-workspace
 
 # Coverage / тесты
 coverage/
