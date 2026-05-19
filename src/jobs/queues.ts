@@ -20,6 +20,7 @@ export const QUEUE_NAMES = {
   GETCOURSE_PULL: 'getcourse_pull_queue',
   GETCOURSE_PARSE: 'getcourse_parse_queue',
   WARMUP: 'warmup_queue',
+  BILLING_ALERT: 'billing_alert_queue',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -235,6 +236,19 @@ export function warmupQueue(): Queue<Record<string, never>> {
   return _warmup;
 }
 
+let _billingAlert: Queue<Record<string, never>> | null = null;
+export function billingAlertQueue(): Queue<Record<string, never>> {
+  if (!_billingAlert) {
+    _billingAlert = buildQueue<Record<string, never>>(QUEUE_NAMES.BILLING_ALERT, {
+      ...DEFAULT_JOB_OPTIONS,
+      attempts: 1,
+      removeOnComplete: { age: 24 * 3600, count: 30 },
+      removeOnFail: { age: 24 * 3600, count: 30 },
+    });
+  }
+  return _billingAlert;
+}
+
 export async function closeAllQueues(): Promise<void> {
   const all: Queue[] = [];
   if (_audio) all.push(_audio);
@@ -247,6 +261,7 @@ export async function closeAllQueues(): Promise<void> {
   if (_gcPull) all.push(_gcPull);
   if (_gcParse) all.push(_gcParse);
   if (_warmup) all.push(_warmup);
+  if (_billingAlert) all.push(_billingAlert);
   await Promise.allSettled(all.map((q) => q.close()));
   _audio = null;
   _refDl = null;
@@ -258,4 +273,5 @@ export async function closeAllQueues(): Promise<void> {
   _gcPull = null;
   _gcParse = null;
   _warmup = null;
+  _billingAlert = null;
 }

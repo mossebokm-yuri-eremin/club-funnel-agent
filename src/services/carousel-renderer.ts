@@ -145,17 +145,35 @@ export async function renderCarousel(
         '../prompts/carousel-image.v1.js'
       );
       const { overlayTextOnImage } = await import('./text-overlay.js');
+      const { recordImageGeneration } = await import('./image-billing.js');
       const visualPrompt = buildSeedreamVisualPrompt({
         slideText,
         slideIndex,
         totalSlides,
         painTag: idea.pain_tag ?? '',
       });
-      const gen = await generateGptunnelImage({
-        prompt: visualPrompt,
-        aspectRatio: '9:16',
-        size: '2K',
-      });
+      let gen: Awaited<ReturnType<typeof generateGptunnelImage>>;
+      try {
+        gen = await generateGptunnelImage({
+          prompt: visualPrompt,
+          aspectRatio: '9:16',
+          size: '2K',
+        });
+      } catch (err) {
+        // Логируем фейл в image_generations для аудита/алертов (статус=error).
+        await recordImageGeneration(deps.pool, {
+          contentPackageId: pkg.id,
+          slideNumber: slideIndex,
+          model: 'seedream-4',
+          provider: 'gptunnel',
+          prompt: visualPrompt,
+          costKopecks: 0,
+          painTag: idea.pain_tag ?? undefined,
+          status: 'error',
+          errorMessage: (err as Error).message.slice(0, 500),
+        });
+        throw err;
+      }
       const rawPng = await downloadGptunnelImage(gen.imageUrl);
       const overlay = await overlayTextOnImage({
         imageBuffer: rawPng,
@@ -166,6 +184,21 @@ export async function renderCarousel(
       });
       finalJpg = overlay.jpg;
       composedMeta = { bytes: overlay.bytes };
+      // INSERT в image_generations (БЛОК D — billing).
+      await recordImageGeneration(deps.pool, {
+        contentPackageId: pkg.id,
+        slideNumber: slideIndex,
+        model: gen.modelUsed,
+        provider: 'gptunnel',
+        prompt: visualPrompt,
+        imageUrlExternal: gen.imageUrl,
+        generationId: gen.generationId,
+        costKopecks: gen.costKopecks,
+        durationMs: gen.durationMs,
+        bytes: overlay.bytes,
+        painTag: idea.pain_tag ?? undefined,
+        status: 'ok',
+      });
       log.info(
         {
           contentPackageId: pkg.id,

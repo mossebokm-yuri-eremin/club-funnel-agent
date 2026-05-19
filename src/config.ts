@@ -51,6 +51,12 @@ const ConfigSchema = z.object({
    *  'placeholder' — серый PNG (smoke / без AI).
    *  'template' — SVG-шаблоны без AI-картинок (CAROUSEL_USE_TEMPLATES). */
   IMAGE_PROVIDER: z.enum(['gptunnel', 'gemini', 'placeholder', 'template']).default('gptunnel'),
+  /** Порог суточного расхода (в копейках), при превышении — TG-алерт Юрию.
+   *  Default 50000 копеек = 500₽ (как Юрий просил). */
+  BILLING_DAILY_ALERT_KOPECKS: z
+    .string()
+    .default('50000')
+    .transform((v) => parseInt(v, 10) || 50000),
   /**
    * HTTPS-прокси для запросов к Gemini API (РФ-VPS → Netherlands прокси).
    * Формат: `http://login:pass@host:port`. Пусто = без прокси (для локального dev).

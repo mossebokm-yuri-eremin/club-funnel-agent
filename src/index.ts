@@ -22,6 +22,10 @@ import {
   createWarmupSenderWorker,
   scheduleWarmupSenderCron,
 } from './jobs/warmup-sender-worker.js';
+import {
+  createBillingAlertWorker,
+  scheduleBillingAlertCron,
+} from './jobs/billing-alert-worker.js';
 import type { Bot } from 'grammy';
 
 interface Shutdownable {
@@ -162,6 +166,21 @@ async function buildHttpServer(): Promise<FastifyInstance> {
     return r.rows[0];
   });
 
+  // Admin: billing summary (image_generations). Bearer = TEST_ENDPOINT_TOKEN.
+  // GET /admin/billing?period=today|week|month
+  app.get('/admin/billing', async (req, reply) => {
+    if (!requireAdminAuth(req)) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    const periodRaw = (req.query as { period?: string } | undefined)?.period ?? 'today';
+    const period = (['today', 'week', 'month'] as const).includes(periodRaw as 'today')
+      ? (periodRaw as 'today' | 'week' | 'month')
+      : 'today';
+    const { getBillingSummary } = await import('./services/image-billing.js');
+    return getBillingSummary(pool, period);
+  });
+
   app.post<{ Params: { id: string } }>('/admin/getcourse/retry/:id', async (req, reply) => {
     if (!requireAdminAuth(req)) {
       reply.code(401);
@@ -207,6 +226,9 @@ function buildBotWorkers(bot: Bot): Shutdownable[] {
   // Warmup sender (cron каждые 5 мин) — отправляет прогревочные сообщения по
   // warmup_messages WHERE status='pending' AND scheduled_at <= NOW().
   workers.push(createWarmupSenderWorker({ pool }));
+  // Billing alert (cron каждый час — TG-алерт если суточный расход на
+  // image_generations превысит BILLING_DAILY_ALERT_KOPECKS).
+  workers.push(createBillingAlertWorker({ pool }));
   return workers;
 }
 
@@ -287,6 +309,13 @@ async function main(): Promise<void> {
     await scheduleWarmupSenderCron();
   } catch (err) {
     log.warn({ err }, 'warmup-sender cron: failed to schedule (continuing)');
+  }
+
+  // Cron: billing alert (каждый час — TG если суточный расход > порога).
+  try {
+    await scheduleBillingAlertCron();
+  } catch (err) {
+    log.warn({ err }, 'billing-alert cron: failed to schedule (continuing)');
   }
 
   await app.listen({ host: config.APP_HOST, port: config.APP_PORT });
