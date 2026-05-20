@@ -102,9 +102,10 @@ export async function activateFunnelOnApprove(
   }
 
   // 4. Генерим code_word.
-  const codeWord = await generateUniqueCodeWord(pool, {
-    painSeed: idea.pain_tag ?? undefined,
-  });
+  const codeWord = await generateUniqueCodeWord(
+    pool,
+    idea.pain_tag ? { painSeed: idea.pain_tag } : {},
+  );
   log.info({ ideaId: input.ideaId, codeWord, strategy: idea.strategy }, 'funnel-activator: code_word');
 
   // 5. INSERT в funnels (status='live' даже если ChatPlace упадёт — retry через cron).

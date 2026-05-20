@@ -53,6 +53,9 @@ function pickString(obj: Record<string, unknown>, keys: readonly string[]): stri
   return null;
 }
 
+// Оставлено как util для будущих fields (по факту parseGcPayload использует
+// прямой obj[...] и smartAmountToKopecks; pickNumber доступен для расширения).
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function pickNumber(obj: Record<string, unknown>, keys: readonly string[]): number | null {
   for (const k of keys) {
     const v = obj[k];
