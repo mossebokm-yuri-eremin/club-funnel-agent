@@ -17,6 +17,8 @@ const ContentPackageRowSchema = z.object({
   tg_post: z.string(),
   carousel_slides: z.unknown(),
   assets: z.unknown(),
+  // Phase 7 RZ-fix (P0.A): rz-вариант лежит в validator_report.rz_variant_post.{text,voice}.
+  validator_report: z.unknown().optional(),
 });
 
 const IdeaRowSchema = z.object({
@@ -89,7 +91,7 @@ export async function notifyApprovalReady(
   const fetchFn = deps.fetchFn ?? fetch;
 
   const pkgRes = await deps.pool.query(
-    `SELECT id, idea_id, reel_caption, tg_post, carousel_slides, assets
+    `SELECT id, idea_id, reel_caption, tg_post, carousel_slides, assets, validator_report
        FROM content_packages WHERE id = $1`,
     [input.contentPackageId],
   );
@@ -117,8 +119,22 @@ export async function notifyApprovalReady(
     `🎲 Стратегия: ${idea.data.strategy ?? '(не выбрана)'}\n\n` +
     `📹 РИЛС:\n${pkg.data.reel_caption.slice(0, 1500)}`;
 
-  // Сообщение 2: пост в TG
-  const postMsg = `📝 ПОСТ В TG:\n${pkg.data.tg_post.slice(0, 3500)}`;
+  // Сообщение 2: пост в TG (голос YE — Юрий)
+  const postMsg = `📝 ПОСТ В TG (YE — Юрий):\n${pkg.data.tg_post.slice(0, 3500)}`;
+
+  // Сообщение 2b: альтернатива от Виктории (голос RZ) — Phase 7 P0.A.
+  // Лежит в validator_report.rz_variant_post.{text, voice}.
+  let rzPostMsg: string | null = null;
+  const vr = pkg.data.validator_report;
+  if (vr && typeof vr === 'object') {
+    const rzObj = (vr as Record<string, unknown>)['rz_variant_post'];
+    if (rzObj && typeof rzObj === 'object') {
+      const rzText = (rzObj as Record<string, unknown>)['text'];
+      if (typeof rzText === 'string' && rzText.trim().length > 0) {
+        rzPostMsg = `📝 ПОСТ ОТ ВИКТОРИИ (RZ — участница клуба):\n${rzText.slice(0, 3500)}`;
+      }
+    }
+  }
 
   // Сообщение 3: текст слайдов карусели (нумерованный) — чтобы было читаемо
   // даже если картинки placeholder/недоступны.
@@ -126,6 +142,7 @@ export async function notifyApprovalReady(
 
   await sendMessage(fetchFn, token, chatId, header);
   await sendMessage(fetchFn, token, chatId, postMsg);
+  if (rzPostMsg) await sendMessage(fetchFn, token, chatId, rzPostMsg);
   if (slidesTextMsg) await sendMessage(fetchFn, token, chatId, slidesTextMsg);
   // Сообщение 4: альбом картинок карусели (если есть)
   if (slideUrls.length > 0) {
