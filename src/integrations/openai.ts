@@ -1,10 +1,19 @@
-// OpenAI integration — embeddings для семантического поиска по knowledge base.
+// Embeddings integration — text-embedding-3-small (1536 dim).
 //
-// Используем text-embedding-3-small (1536 dim) — соответствует существующей колонке
-// bonus_library.embedding vector(1536). Лёгкий, дешёвый, достаточный для FAQ-стиля
-// поиска по нашей KB (~4000 строк, ~50 чанков).
+// Default provider — GPTunnel (российский агрегатор, оплата ₽, OpenAI-совместимый):
+//   POST https://gptunnel.ru/v1/embeddings
+//   Authorization: <token>           ← БЕЗ префикса 'Bearer'
+//   body: { model, input }
+//   response: { data:[{embedding}], usage:{ prompt_tokens, total_cost, ... } }
 //
-// Без зависимости от openai SDK — нативный fetch.
+// Fallback (опц., EMBEDDING_OPENAI_FALLBACK=true) — прямой OpenAI:
+//   POST https://api.openai.com/v1/embeddings
+//   Authorization: Bearer <token>
+//
+// Файл оставлен с именем openai.ts и теми же exported-функциями
+// (createEmbedding, createEmbeddingsBatch), чтобы не ломать вызовы
+// knowledge-loader / refresh-kb. Имя файла = legacy; провайдер
+// выбирается через config.EMBEDDING_PROVIDER.
 
 import { config } from '../config.js';
 import { log } from '../observability/logger.js';
@@ -18,84 +27,168 @@ export interface EmbeddingResult {
   embedding: number[];
   model: string;
   inputTokens: number;
+  /** Стоимость в рублях (GPTunnel вернёт; для прямого OpenAI = 0). */
+  costRub?: number;
+  /** Провайдер, который реально отработал ('gptunnel' | 'openai'). */
+  providerUsed?: 'gptunnel' | 'openai';
 }
 
-interface OpenAIEmbedResponse {
+interface OpenAICompatEmbedResponse {
   data: Array<{ embedding: number[]; index: number }>;
   model: string;
-  usage: { prompt_tokens: number; total_tokens: number };
+  usage: {
+    prompt_tokens: number;
+    total_tokens: number;
+    total_cost?: number;
+    prompt_cost?: number;
+  };
 }
 
-/** Возвращает embedding для одного куска текста через OpenAI. */
-export async function createEmbedding(
-  input: string,
-  opts: { model?: string } = {},
-): Promise<EmbeddingResult> {
-  const apiKey = config.OPENAI_API_KEY;
-  if (!apiKey) throw new Error('openai: OPENAI_API_KEY not set');
-  const model = opts.model ?? EMBEDDING_MODEL;
-  const startedAt = Date.now();
-  const res = await fetch(`${OPENAI_API_BASE}/embeddings`, {
+type Provider = 'gptunnel' | 'openai';
+
+function pickProviderChain(): Provider[] {
+  const primary: Provider = config.EMBEDDING_PROVIDER === 'openai' ? 'openai' : 'gptunnel';
+  const chain: Provider[] = [primary];
+  if (primary === 'gptunnel' && config.EMBEDDING_OPENAI_FALLBACK && config.OPENAI_API_KEY) {
+    chain.push('openai');
+  }
+  return chain;
+}
+
+function providerEndpoint(p: Provider): string {
+  if (p === 'gptunnel') return `${config.GPTUNNEL_EMBEDDING_BASE_URL.replace(/\/$/, '')}/embeddings`;
+  return `${OPENAI_API_BASE}/embeddings`;
+}
+
+function providerAuthHeader(p: Provider): string | null {
+  if (p === 'gptunnel') {
+    return config.GPTUNNEL_API_KEY ? config.GPTUNNEL_API_KEY : null;
+  }
+  return config.OPENAI_API_KEY ? `Bearer ${config.OPENAI_API_KEY}` : null;
+}
+
+function providerModel(p: Provider, requested?: string): string {
+  if (requested) return requested;
+  if (p === 'gptunnel') return config.GPTUNNEL_EMBEDDING_MODEL;
+  return EMBEDDING_MODEL;
+}
+
+async function callEmbed(
+  provider: Provider,
+  input: string | string[],
+  model: string,
+): Promise<OpenAICompatEmbedResponse> {
+  const auth = providerAuthHeader(provider);
+  if (!auth) {
+    throw new Error(
+      provider === 'gptunnel'
+        ? 'embeddings: GPTUNNEL_API_KEY not set'
+        : 'embeddings: OPENAI_API_KEY not set',
+    );
+  }
+  const url = providerEndpoint(provider);
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: auth,
     },
     body: JSON.stringify({ input, model }),
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    throw new Error(`openai embeddings HTTP ${res.status}: ${t.slice(0, 200)}`);
+    throw new Error(
+      `embeddings[${provider}] HTTP ${res.status}: ${t.slice(0, 200)}`,
+    );
   }
-  const j = (await res.json()) as OpenAIEmbedResponse;
-  if (!j.data?.[0]?.embedding) {
-    throw new Error('openai embeddings: no embedding in response');
+  return (await res.json()) as OpenAICompatEmbedResponse;
+}
+
+async function withFallback<T>(
+  fn: (provider: Provider) => Promise<T>,
+): Promise<{ data: T; providerUsed: Provider }> {
+  const chain = pickProviderChain();
+  let lastErr: Error | null = null;
+  for (const p of chain) {
+    try {
+      const data = await fn(p);
+      return { data, providerUsed: p };
+    } catch (err) {
+      lastErr = err as Error;
+      log.warn(
+        { provider: p, err: lastErr.message.slice(0, 200) },
+        'embeddings: provider failed, trying next',
+      );
+    }
   }
-  log.debug(
-    {
-      model: j.model,
-      tokens: j.usage.total_tokens,
-      duration_ms: Date.now() - startedAt,
-      dim: j.data[0].embedding.length,
-    },
-    'openai: embedding ok',
+  throw lastErr ?? new Error('embeddings: all providers failed');
+}
+
+/** Возвращает embedding для одного куска текста. */
+export async function createEmbedding(
+  input: string,
+  opts: { model?: string } = {},
+): Promise<EmbeddingResult> {
+  const startedAt = Date.now();
+  const { data: j, providerUsed } = await withFallback((provider) =>
+    callEmbed(provider, input, providerModel(provider, opts.model)),
   );
-  return {
+  if (!j.data?.[0]?.embedding) {
+    throw new Error(`embeddings[${providerUsed}]: no embedding in response`);
+  }
+  const result: EmbeddingResult = {
     embedding: j.data[0].embedding,
     model: j.model,
     inputTokens: j.usage.prompt_tokens,
+    providerUsed,
   };
+  if (typeof j.usage.total_cost === 'number') result.costRub = j.usage.total_cost;
+  log.debug(
+    {
+      provider: providerUsed,
+      model: j.model,
+      tokens: j.usage.total_tokens,
+      cost_rub: j.usage.total_cost,
+      duration_ms: Date.now() - startedAt,
+      dim: j.data[0].embedding.length,
+    },
+    'embeddings: ok',
+  );
+  return result;
 }
 
-/** Batch: эмбеддит массив строк за один запрос (до ~2048 inputs). Дешевле и быстрее. */
+/** Batch: эмбеддит массив строк за один запрос. */
 export async function createEmbeddingsBatch(
   inputs: string[],
   opts: { model?: string } = {},
 ): Promise<EmbeddingResult[]> {
   if (inputs.length === 0) return [];
-  const apiKey = config.OPENAI_API_KEY;
-  if (!apiKey) throw new Error('openai: OPENAI_API_KEY not set');
-  const model = opts.model ?? EMBEDDING_MODEL;
-  const res = await fetch(`${OPENAI_API_BASE}/embeddings`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ input: inputs, model }),
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    throw new Error(`openai embeddings batch HTTP ${res.status}: ${t.slice(0, 200)}`);
-  }
-  const j = (await res.json()) as OpenAIEmbedResponse;
-  // Sorted by index in response
+  const startedAt = Date.now();
+  const { data: j, providerUsed } = await withFallback((provider) =>
+    callEmbed(provider, inputs, providerModel(provider, opts.model)),
+  );
   const sorted = [...j.data].sort((a, b) => a.index - b.index);
-  return sorted.map((d) => ({
-    embedding: d.embedding,
-    model: j.model,
-    inputTokens: 0, // батч даёт суммарный prompt_tokens — не разбиваем
-  }));
+  log.info(
+    {
+      provider: providerUsed,
+      model: j.model,
+      count: sorted.length,
+      tokens: j.usage.total_tokens,
+      cost_rub: j.usage.total_cost,
+      duration_ms: Date.now() - startedAt,
+    },
+    'embeddings: batch ok',
+  );
+  return sorted.map((d) => {
+    const r: EmbeddingResult = {
+      embedding: d.embedding,
+      model: j.model,
+      inputTokens: 0,
+      providerUsed,
+    };
+    if (typeof j.usage.total_cost === 'number') r.costRub = j.usage.total_cost;
+    return r;
+  });
 }
 
 /** Косинусное сходство (для тестов / on-the-fly без pgvector). */

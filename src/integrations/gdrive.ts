@@ -29,6 +29,7 @@ export interface GDriveFileMeta {
   mimeType: string;
   modifiedTime?: string;
   md5Checksum?: string;
+  size?: string;
 }
 
 export interface GDriveUploader {
@@ -184,7 +185,7 @@ export async function listFolderFiles(folderId: string): Promise<GDriveFileMeta[
   const sa = await loadServiceAccountOrThrow();
   const token = await exchangeJwtForAccessToken(sa);
   const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
-  const fields = encodeURIComponent('files(id,name,mimeType,modifiedTime,md5Checksum)');
+  const fields = encodeURIComponent('files(id,name,mimeType,modifiedTime,md5Checksum,size)');
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&pageSize=1000`;
   const res = await geminiFetch(url, {
     headers: { authorization: `Bearer ${token}` },
@@ -229,4 +230,106 @@ export function createGDriveUploader(): GDriveUploader {
       return multipartUpload(accessToken, filename, bytes, targetFolder);
     },
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 9 extensions: GDrive helpers for carousel style-transfer
+//   - getFolderIdByName(parentId, name) → ищет подпапку по имени
+//   - listFolderRecursive(folderId, opts) → рекурсивный обход
+//   - downloadAndCache(fileId, opts) → загрузка с локальным TTL-кэшем
+//   - extFromMime(mime) → расширение по MIME
+// Кэш: GDRIVE_CACHE_DIR (default /var/club-funnel/template-cache), TTL = GDRIVE_CACHE_TTL_HOURS (default 24h).
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+
+const CACHE_DIR = process.env.GDRIVE_CACHE_DIR ?? '/var/club-funnel/template-cache';
+const CACHE_TTL_MS = (Number(process.env.GDRIVE_CACHE_TTL_HOURS) || 24) * 3600_000;
+
+export function extFromMime(mime: string): string {
+  if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg';
+  if (mime.includes('png')) return 'png';
+  if (mime.includes('webp')) return 'webp';
+  if (mime.includes('gif')) return 'gif';
+  if (mime.includes('pdf')) return 'pdf';
+  if (mime.includes('svg')) return 'svg';
+  return 'bin';
+}
+
+/** Ищет подпапку с заданным именем внутри parentId. Возвращает id или null. */
+export async function getFolderIdByName(
+  parentId: string,
+  name: string,
+): Promise<string | null> {
+  const sa = await loadServiceAccountOrThrow();
+  const token = await exchangeJwtForAccessToken(sa);
+  const q = encodeURIComponent(
+    `'${parentId}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder' and name='${name.replace(/'/g, "\\'")}'`,
+  );
+  const fields = encodeURIComponent('files(id,name)');
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&pageSize=10`;
+  const res = await geminiFetch(url, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    log.warn(
+      { parentId, name, status: res.status, body: t.slice(0, 200) },
+      'gdrive: getFolderIdByName failed',
+    );
+    return null;
+  }
+  const json = (await res.json()) as { files?: Array<{ id: string; name: string }> };
+  return json.files?.[0]?.id ?? null;
+}
+
+/** Рекурсивный обход папки. Опц. фильтр по MIME-префиксу ('image/'). */
+export async function listFolderRecursive(
+  folderId: string,
+  opts: { mimePrefix?: string; maxDepth?: number } = {},
+): Promise<GDriveFileMeta[]> {
+  const maxDepth = opts.maxDepth ?? 5;
+  const out: GDriveFileMeta[] = [];
+  async function walk(id: string, depth: number): Promise<void> {
+    if (depth > maxDepth) return;
+    const items = await listFolderFiles(id);
+    for (const f of items) {
+      if (f.mimeType === 'application/vnd.google-apps.folder') {
+        await walk(f.id, depth + 1);
+      } else {
+        if (!opts.mimePrefix || f.mimeType.startsWith(opts.mimePrefix)) {
+          out.push(f);
+        }
+      }
+    }
+  }
+  await walk(folderId, 0);
+  return out;
+}
+
+/** Скачивает файл с локальным TTL-кэшем. Возвращает буфер + путь к кэшу. */
+export async function downloadAndCache(
+  fileId: string,
+  opts: { mimeHint?: string; ext?: string } = {},
+): Promise<{ path: string; buf: Buffer; cached: boolean }> {
+  const ext = opts.ext ?? (opts.mimeHint ? extFromMime(opts.mimeHint) : 'bin');
+  const cachePath = path.join(CACHE_DIR, `${fileId}.${ext}`);
+  // Hit
+  if (existsSync(cachePath)) {
+    try {
+      const st = await stat(cachePath);
+      if (Date.now() - st.mtimeMs < CACHE_TTL_MS) {
+        const buf = await readFile(cachePath);
+        return { path: cachePath, buf, cached: true };
+      }
+    } catch {
+      // fallthrough — refresh
+    }
+  }
+  // Miss → fetch
+  const buf = await downloadFile(fileId);
+  await mkdir(CACHE_DIR, { recursive: true });
+  await writeFile(cachePath, buf);
+  return { path: cachePath, buf, cached: false };
 }

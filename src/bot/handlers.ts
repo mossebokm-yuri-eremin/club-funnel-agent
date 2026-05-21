@@ -202,11 +202,11 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
       return;
     }
     try {
-      const { clearTemplateCache } = await import('../services/carousel-template-renderer.js');
+      const { clearTemplateCache } = await import('../services/carousel-template-selector.js');
       clearTemplateCache();
       await ctx.reply(
         '✅ Кэш шаблонов сброшен.\n' +
-          'Следующая карусель загрузит свежие SVG из GDrive (или из assets/, если папка не задана).',
+          'Следующая карусель перечитает структуру эталонных папок из GDrive.',
       );
       log.info({ from: ctx.from?.id }, '/refresh_templates: cache cleared');
     } catch (err) {

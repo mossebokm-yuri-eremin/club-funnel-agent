@@ -96,10 +96,22 @@ const ConfigSchema = z.object({
   DEEPGRAM_LANGUAGE: z.string().default('ru'),
 
   // --- Embeddings ---
-  EMBEDDING_PROVIDER: z.enum(['openai', 'anthropic']).default('openai'),
+  // 'gptunnel' (default) — российский агрегатор, оплата ₽, OpenAI-compatible API.
+  // 'openai'  — прямой OpenAI (нужна иностранная карта).
+  // 'anthropic' — зарезервировано на будущее.
+  EMBEDDING_PROVIDER: z.enum(['gptunnel', 'openai', 'anthropic']).default('gptunnel'),
   OPENAI_API_KEY: z.string().optional(),
-  EMBEDDING_MODEL: z.string().default('text-embedding-3-large'),
+  EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
   EMBEDDING_DIM: intNum.default(1536),
+  /** GPTunnel embeddings endpoint base. Тот же GPTUNNEL_API_KEY что и для картинок. */
+  GPTUNNEL_EMBEDDING_BASE_URL: z.string().url().default('https://gptunnel.ru/v1'),
+  GPTUNNEL_EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
+  /** Включить ли fallback на прямой OpenAI, если GPTunnel вернул ошибку.
+   *  Имеет смысл только если есть валидный OPENAI_API_KEY. */
+  EMBEDDING_OPENAI_FALLBACK: z
+    .string()
+    .default('true')
+    .transform((v) => v === 'true' || v === '1'),
 
   // --- Telegram ---
   TELEGRAM_BOT_TOKEN: z.string().min(1, 'TELEGRAM_BOT_TOKEN required'),

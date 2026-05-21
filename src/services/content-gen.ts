@@ -36,8 +36,6 @@ import {
   DEFAULT_STYLE,
   type ContentStyle,
 } from './user-preferences.js';
-import { findRelevantKbChunks, formatKbExcerpts } from './knowledge-loader.js';
-import { getLastWinningPatterns, formatWinningPatterns } from './winning-patterns.js';
 
 export interface ContentGenInput {
   ideaId: string;

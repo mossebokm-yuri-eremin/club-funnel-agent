@@ -41,6 +41,21 @@ function extractSlideUrls(assets: unknown): string[] {
   return [];
 }
 
+function extractTemplateInfo(
+  assets: unknown,
+): { folder: string; theme?: string; classified_by?: string } | null {
+  if (!assets || typeof assets !== 'object') return null;
+  const t = (assets as Record<string, unknown>)['template'];
+  if (!t || typeof t !== 'object') return null;
+  const obj = t as Record<string, unknown>;
+  const folder = typeof obj['folder'] === 'string' ? obj['folder'] : null;
+  if (!folder) return null;
+  const out: { folder: string; theme?: string; classified_by?: string } = { folder };
+  if (typeof obj['theme'] === 'string') out.theme = obj['theme'];
+  if (typeof obj['classified_by'] === 'string') out.classified_by = obj['classified_by'];
+  return out;
+}
+
 function extractSlideTexts(slides: unknown): string[] {
   if (!Array.isArray(slides)) return [];
   return slides
@@ -148,11 +163,16 @@ export async function notifyApprovalReady(
   if (slideUrls.length > 0) {
     await sendMediaGroup(fetchFn, token, chatId, slideUrls.slice(0, 10));
   }
+  const templateInfo = extractTemplateInfo(pkg.data.assets);
+  const inspiredBy = templateInfo
+    ? `\n✨ Вдохновлено: ${templateInfo.folder}` +
+      (templateInfo.classified_by ? ` (${templateInfo.classified_by})` : '')
+    : '';
   await sendMessage(
     fetchFn,
     token,
     chatId,
-    `✅ content_package_id: \`${pkg.data.id}\`\n\nВыбери действие ниже.`,
+    `✅ content_package_id: \`${pkg.data.id}\`${inspiredBy}\n\nВыбери действие ниже.`,
     'Markdown',
     buildApprovalKeyboard(pkg.data.id),
   );

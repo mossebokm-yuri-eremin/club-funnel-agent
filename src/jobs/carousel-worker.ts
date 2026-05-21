@@ -1,5 +1,5 @@
-// Воркер 'visual_queue': принимает {content_package_id, idea_id, style_hint?},
-// вызывает carousel-renderer (Nano Banana → Sharp → Cloudinary).
+// Воркер 'visual_queue': принимает {content_package_id, idea_id},
+// вызывает carousel-renderer (Seedream style-transfer → Sharp overlay → Cloudinary).
 //
 // Воркер CPU+IO-bound (sharp + uploads), concurrency=1 на инстанс по умолчанию.
 
@@ -54,16 +54,15 @@ async function process(
   job: Job<VisualJobData>,
   deps: CarouselWorkerDeps,
 ): Promise<CarouselWorkerResult> {
-  const { content_package_id, style_hint } = job.data;
+  const { content_package_id } = job.data;
   if (!content_package_id) {
     return { status: 'skipped', contentPackageId: '', reason: 'no content_package_id' };
   }
   try {
-    const renderInput: Parameters<typeof renderCarousel>[0] = {
-      contentPackageId: content_package_id,
-    };
-    if (style_hint) renderInput.styleHint = style_hint;
-    const res = await renderCarousel(renderInput, { pool: deps.pool });
+    const res = await renderCarousel(
+      { contentPackageId: content_package_id },
+      { pool: deps.pool },
+    );
 
     // SPEC §2.8 AC-22 (упрощённо): после рендера каруселей шлём готовый
     // пакет Юрию в Telegram. Без этого Юрий не узнаёт что контент готов.

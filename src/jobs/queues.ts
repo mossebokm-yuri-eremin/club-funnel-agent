@@ -100,8 +100,8 @@ export interface ReferenceProcessJobData {
 }
 
 export interface VisualJobData {
-  /** Идея, под которую рендерим карусель. */
-  idea_id: string;
+  /** Идея, под которую рендерим карусель. Опц. — renderCarousel сам читает idea_id из content_packages. */
+  idea_id?: string;
   /** ID content_package — обновим в нём поле assets с URL'ами. */
   content_package_id: string;
   /** Подсказка стиля от Юрия (опционально). */

@@ -78,7 +78,7 @@ export async function geminiFetch(
   // Используем undici.fetch (не global) — он принимает dispatcher.
   // Global fetch в Node 22 не пробрасывает dispatcher из RequestInit.
   const fetchOpts: Parameters<typeof undiciFetch>[1] = {
-    ...(rest as Parameters<typeof undiciFetch>[1]),
+    ...(rest as unknown as Parameters<typeof undiciFetch>[1]),
     signal: controller.signal,
   };
   if (agent) (fetchOpts as { dispatcher?: ProxyAgent }).dispatcher = agent;

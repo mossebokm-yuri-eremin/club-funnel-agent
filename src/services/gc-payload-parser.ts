@@ -226,3 +226,4 @@ export function isClubPayment(parsed: GcParsedPayment, baseOfferId: string | nul
   if (!baseOfferId) return true; // если не задан конкретный offer — принимаем любой club_purchased
   return parsed.productId === baseOfferId;
 }
+void pickNumber;

@@ -84,6 +84,48 @@ async function buildHttpServer(): Promise<FastifyInstance> {
     }
   });
 
+  // /test/carousel-with-style — рендерит карусель целиком (style-transfer flow):
+  // classify theme → select GDrive references → Seedream per-slide → Sharp overlay → upload.
+  // body: { content_package_id: uuid }
+  app.post('/test/carousel-with-style', async (req, reply) => {
+    const token = config.TEST_ENDPOINT_TOKEN;
+    const auth = (req.headers['authorization'] ?? '') as string;
+    if (!token || auth !== `Bearer ${token}`) {
+      reply.code(401);
+      return { error: 'unauthorized' };
+    }
+    const body = (req.body ?? {}) as { content_package_id?: string };
+    if (!body.content_package_id) {
+      reply.code(400);
+      return { ok: false, error: 'content_package_id required' };
+    }
+    try {
+      const { renderCarousel } = await import('./services/carousel-renderer.js');
+      const res = await renderCarousel(
+        { contentPackageId: body.content_package_id },
+        { pool },
+      );
+      return {
+        ok: true,
+        contentPackageId: res.contentPackageId,
+        theme: res.theme,
+        templateFolder: res.templateFolderName,
+        classifiedBy: res.classifiedBy,
+        slides: res.slides.map((s) => ({
+          index: s.index,
+          url: s.url,
+          source: s.source,
+          bytes: s.bytes,
+          durationMs: s.durationMs,
+        })),
+        totalDurationMs: res.totalDurationMs,
+      };
+    } catch (err) {
+      reply.code(502);
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
   app.post('/test/image-gen', async (req, reply) => {
     const token = config.TEST_ENDPOINT_TOKEN;
     const auth = (req.headers['authorization'] ?? '') as string;

@@ -61,7 +61,7 @@ export async function activateFunnelOnApprove(
       funnelId: r.id,
       codeWord: r.code_word,
       chatplaceAutomationId: r.chatplace_automation_id,
-      status: r.status,
+      status: r.status as 'live',
     };
   }
 
