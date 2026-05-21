@@ -123,32 +123,29 @@ export interface SeedreamVisualConceptInput {
 
 export function buildSeedreamVisualPrompt(input: SeedreamVisualConceptInput): string {
   const isCover = input.slideIndex === 1;
-  const isClosing = input.slideIndex === input.totalSlides;
-  // Английский, чтобы Seedream хорошо понял style. Текст слайда наносится Sharp поверх.
+  const isClosing = input.slideIndex === input.totalSlides && input.totalSlides > 1;
+  // Минимальный prompt — НЕ задаём конкретный визуальный стиль (раньше Kinfolk/Cereal
+  // перебивал style-references). Просим Seedream скопировать стиль/палитру/типографику
+  // эталонных слайдов из images[]. Текст слайда наносим Sharp-ом поверх, в prompt не пихаем.
   const role = isCover
-    ? 'opening cover slide of an Instagram carousel — strong visual hook with negative space at top for headline overlay'
+    ? 'opening cover slide of an Instagram carousel — strong visual hook, empty space at top for headline overlay'
     : isClosing
-      ? 'closing slide of an Instagram carousel — calming finale with negative space for CTA overlay'
-      : 'middle slide of a carousel — supporting illustration with negative space for body-text overlay';
-  // Метафоры по pain_tag — лёгкие подсказки, не директивные.
+      ? 'closing call-to-action slide of the carousel — empty space at bottom for CTA overlay'
+      : 'middle body slide of the carousel — supporting illustration, empty space for text overlay';
   const painHint = mapPainToVisualHint(input.painTag);
   return [
-    'Premium minimalist editorial photography, 9:16 vertical, magazine-quality.',
+    'Match the visual style, color palette, composition, mood, lighting, and typography of the reference images exactly.',
+    'The output must look like another slide from the same Instagram carousel as the references — same author, same series.',
     `Role: ${role}.`,
-    `Visual metaphor hint: ${painHint}.`,
-    'Composition: clean, lots of negative space (especially at top OR bottom — leave 40% empty for text overlay).',
-    'Color palette: warm orange #ff7518 accent, graphite #2C2826, warm beige paper #dfdbd8, off-white.',
-    'Light: soft warm directional light, no harsh shadows, golden-hour or soft window light.',
-    'Texture: paper, linen, matte ceramic, weathered wood — tactile editorial feel.',
-    'Style references: Kinfolk magazine, Cereal magazine, The New Yorker photo essays.',
+    `Subject hint: ${painHint}.`,
+    '9:16 vertical, photorealistic editorial quality.',
     '',
     'STRICT RULES:',
     '- NO text, NO letters, NO typography, NO words in any language.',
     '- NO logos, NO watermarks, NO brand marks.',
-    '- NO human faces, NO hands, NO people (silhouettes acceptable only as extreme background).',
+    '- NO additional human faces (use the provided portrait reference if a face is needed).',
     '- NO AI-generated avatars, NO clip-art, NO stock-photo cliché.',
-    '- NO bright saturated colors outside the palette.',
-    '- Photorealistic editorial, not illustration.',
+    '- Preserve the reference palette, lighting, and texture — do NOT introduce new colors or styles.',
   ].join('\n');
 }
 

@@ -338,27 +338,47 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
               const { activateFunnelOnApprove } = await import(
                 '../services/funnel-activator.js'
               );
-              const r = await activateFunnelOnApprove(opts.pool!, {
-                ideaId: ideaIdForLog,
-                contentPackageId: pkgId,
-              });
-              if (r) {
-                await ctx.reply(
-                  `🔗 Воронка активирована\n` +
-                    `code_word: \`${r.codeWord}\`\n` +
-                    `funnel_id: \`${r.funnelId.slice(0, 8)}\`\n` +
-                    `ChatPlace: ${r.chatplaceAutomationId ? '✅ ' + r.chatplaceAutomationId.slice(0, 12) : '⚠️ pending'}`,
-                  { parse_mode: 'Markdown' },
+              let r: Awaited<ReturnType<typeof activateFunnelOnApprove>> = null;
+              let activateErr: Error | null = null;
+              try {
+                r = await activateFunnelOnApprove(opts.pool!, {
+                  ideaId: ideaIdForLog,
+                  contentPackageId: pkgId,
+                });
+              } catch (err) {
+                activateErr = err as Error;
+                log.error(
+                  { err: activateErr.message, pkgId, ideaId: ideaIdForLog },
+                  'approval-callback: funnel-activator failed (non-fatal)',
                 );
               }
-            } catch (err) {
+              // Сообщение без parse_mode — `_` в code_word ломает Markdown entity-parser.
+              if (r) {
+                const cpLine = r.chatplaceAutomationId
+                  ? '✅ ' + r.chatplaceAutomationId.slice(0, 12)
+                  : '⚠️ pending';
+                await ctx.reply(
+                  '🔗 Воронка активирована\n' +
+                    `code_word: ${r.codeWord}\n` +
+                    `funnel_id: ${r.funnelId.slice(0, 8)}\n` +
+                    `ChatPlace: ${cpLine}`,
+                ).catch((e) => {
+                  log.warn(
+                    { err: (e as Error).message },
+                    'approval-callback: confirm-reply send failed (non-fatal)',
+                  );
+                });
+              } else if (activateErr) {
+                await ctx.reply(
+                  '⚠️ Воронка не активирована: ' + activateErr.message.slice(0, 200),
+                ).catch(() => {});
+              }
+            } catch (errOuter) {
+              // outer-catch на случай если await activate сам сломался до try внутри
               log.error(
-                { err: (err as Error).message, pkgId, ideaId: ideaIdForLog },
-                'approval-callback: funnel-activator failed (non-fatal)',
+                { err: (errOuter as Error).message, pkgId },
+                'approval-callback: outer wrapper error',
               );
-              await ctx.reply(
-                `⚠️ Воронка не активирована: ${(err as Error).message.slice(0, 200)}`,
-              ).catch(() => {});
             }
           })();
         }
@@ -519,7 +539,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
             return;
           }
           const wordCount = (r.longread_draft_md.match(/[\p{L}\p{N}]+/gu) ?? []).length;
-          const ins = await opts.pool.query<{ id: string }>(
+          const ins = await opts.pool!.query<{ id: string }>(
             `INSERT INTO bonus_library
                (title, pain_tag, outline, body_md, pdf_url, pdf_gdrive_id, word_count, status, origin, source_idea_id)
              VALUES ($1, $2, $3::jsonb, $4, '', '', $5, 'live', 'strategy_c', $6)
@@ -748,14 +768,30 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
       return;
     }
 
-    // Иначе — обычный текст. AC-2: source='text'. Фактическая запись в `ideas`
-    // делается в Фазе 3 через тот же путь, что и stt. Пока — ack.
+    // Иначе — обычный текст идеи (AC-2 source='text'). Пишем в ideas и пушим в idea_queue —
+    // тот же контракт, что у stt-worker после транскрибации голоса.
     if (m.text && m.text.trim().length > 0) {
-      log.info(
-        { from: ctx.from?.id, message_id: m.message_id, len: m.text.length },
-        'text message received (idea draft)',
-      );
-      await ctx.reply('Принял текст. Сделаю из него идею.');
+      try {
+        const ideaRes = await opts.pool!.query<{ id: string }>(
+          `INSERT INTO ideas (source, raw_transcript, status) VALUES ('text', $1, 'new') RETURNING id`,
+          [m.text],
+        );
+        const ideaId = ideaRes.rows[0]!.id;
+        log.info(
+          { from: ctx.from?.id, message_id: m.message_id, len: m.text.length, ideaId },
+          'text message → idea created',
+        );
+        await ctx.reply('Принял. Делаю идею, пакет придёт отдельным сообщением.');
+        const { ideaQueue } = await import('../jobs/queues.js');
+        await ideaQueue().add('build', { idea_id: ideaId }, { jobId: `idea-${ideaId}` });
+        log.info({ ideaId, queue: 'idea_queue' }, 'text handler: idea ENQUEUED ok');
+      } catch (err) {
+        log.error(
+          { err: (err as Error).message, stack: (err as Error).stack },
+          'text handler: failed to create/enqueue idea',
+        );
+        await ctx.reply('Принял текст, но в очередь не положил — посмотри логи.');
+      }
     }
   });
 
