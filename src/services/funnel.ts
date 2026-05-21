@@ -75,7 +75,7 @@ export async function trackEvent(input: TrackEventInput, deps: FunnelDeps): Prom
     INSERT INTO funnel_events
       (funnel_id, subscriber_id, code_word, event_type, source, payload, occurred_at, idempotency_key)
     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
-    ON CONFLICT (idempotency_key) DO NOTHING
+    ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
     RETURNING id`;
   const res = await deps.pool.query<{ id: number }>(sql, [
     input.funnelId ?? null,

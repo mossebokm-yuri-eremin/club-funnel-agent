@@ -132,6 +132,10 @@ const ConfigSchema = z.object({
   CHATPLACE_API_BASE: z.string().url().default('https://api.chatplace.io/v1'),
   CHATPLACE_API_KEY: z.string().optional(),
   CHATPLACE_WEBHOOK_TOKEN: z.string().optional(),
+  /** UUID Instagram-бота в ChatPlace (узнать через MCP bots_list, один раз). */
+  CHATPLACE_IG_BOT_ID: z.string().optional(),
+  /** Override URL MCP-сервера (по умолчанию https://mcp.chatplace.io/mcp). */
+  CHATPLACE_MCP_URL: z.string().url().optional(),
 
   // --- GetCourse ---
   GC_ACCOUNT: z.string().optional(),
