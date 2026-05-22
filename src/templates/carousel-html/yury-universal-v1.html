@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>{{deck_title}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,700;1,400&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #888; font-family: 'Inter', sans-serif; }
+  body { padding: 0; }
+
+  :root {
+    --bg: #f1f0ec;
+    --fg: #0f0f0f;
+    --muted: #5b5b58;
+    --accent: #b6532a;            /* тёплый терракот — из палитры slide-11 */
+    --cta-bg: #0f0f0f;
+    --cta-fg: #f1f0ec;
+    --cta-accent: #f1c376;        /* мягкий жёлтый акцент для CTA */
+    --serif: 'Playfair Display', Georgia, serif;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  .slide {
+    width: 1080px;
+    height: 1350px;
+    position: relative;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 90px 90px 110px 90px;
+    display: flex;
+    flex-direction: column;
+    page-break-after: always;
+    margin: 0 0 32px 0;          /* визуальный гэп при предпросмотре в одном html */
+  }
+
+  /* Header strip (тёплая узкая полоска вверху во всех слайдах) */
+  .slide::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 6px;
+    background: linear-gradient(90deg, var(--accent) 0%, #d97a4b 50%, var(--accent) 100%);
+  }
+
+  /* Бренд-метка слева вверху */
+  .brand {
+    position: absolute;
+    top: 36px; left: 90px;
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .brand::before {
+    content: '●';
+    color: var(--accent);
+    margin-right: 8px;
+    font-size: 10px;
+    vertical-align: middle;
+  }
+
+  /* Page badge BR-corner */
+  .badge {
+    position: absolute;
+    right: 36px;
+    bottom: 36px;
+    background: var(--fg);
+    color: var(--bg);
+    font-family: var(--sans);
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    padding: 12px 18px;
+    border-radius: 4px;
+  }
+
+  /* ─── COVER ───────────────────────────────────────────────── */
+  .slide.cover { padding-top: 140px; }
+  .slide.cover .eyebrow {
+    font-family: var(--sans);
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    margin-bottom: 32px;
+  }
+  .slide.cover .headline {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: 92px;
+    line-height: 1.04;
+    letter-spacing: -0.015em;
+    color: var(--fg);
+    max-width: 880px;
+    margin-bottom: 36px;
+  }
+  .slide.cover .headline em {
+    font-style: italic;
+    color: var(--accent);
+  }
+  .slide.cover .subhead {
+    font-family: var(--sans);
+    font-size: 28px;
+    font-weight: 400;
+    color: var(--muted);
+    line-height: 1.35;
+    max-width: 720px;
+    margin-top: auto;
+    margin-bottom: 24px;
+  }
+  .slide.cover .author {
+    font-family: var(--sans);
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    color: var(--fg);
+    border-top: 2px solid var(--fg);
+    padding-top: 18px;
+    width: 280px;
+  }
+
+  /* ─── BODY ────────────────────────────────────────────────── */
+  .slide.body .hook {
+    font-family: var(--serif);
+    font-style: italic;
+    font-weight: 500;
+    font-size: 44px;
+    line-height: 1.18;
+    color: var(--accent);
+    max-width: 880px;
+    margin-bottom: 56px;
+  }
+  .slide.body .body-text {
+    font-family: var(--sans);
+    font-size: 32px;
+    font-weight: 400;
+    line-height: 1.44;
+    color: var(--fg);
+    max-width: 880px;
+    letter-spacing: -0.01em;
+  }
+  .slide.body .body-text strong {
+    font-weight: 700;
+    color: var(--fg);
+  }
+  .slide.body .footnote {
+    margin-top: auto;
+    font-family: var(--sans);
+    font-size: 18px;
+    font-weight: 400;
+    color: var(--muted);
+    max-width: 720px;
+  }
+
+  /* Pull-quote variant (large headline body) */
+  .slide.body.quote .hook { display: none; }
+  .slide.body.quote .body-text {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 56px;
+    font-weight: 500;
+    line-height: 1.18;
+    color: var(--fg);
+  }
+  .slide.body.quote .body-text::before {
+    content: '«';
+    font-size: 1.4em;
+    color: var(--accent);
+    line-height: 0.5;
+    vertical-align: -0.05em;
+    margin-right: 8px;
+  }
+  .slide.body.quote .body-text::after {
+    content: '»';
+    font-size: 1.4em;
+    color: var(--accent);
+    line-height: 0.5;
+    vertical-align: -0.05em;
+    margin-left: 8px;
+  }
+
+  /* ─── CTA ─────────────────────────────────────────────────── */
+  .slide.cta {
+    background: var(--cta-bg);
+    color: var(--cta-fg);
+    padding: 140px 90px 110px 90px;
+  }
+  .slide.cta::before {
+    background: linear-gradient(90deg, var(--cta-accent) 0%, #f1c376 50%, var(--cta-accent) 100%);
+  }
+  .slide.cta .brand { color: rgba(241, 240, 236, 0.55); }
+  .slide.cta .brand::before { color: var(--cta-accent); }
+  .slide.cta .headline {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: 88px;
+    line-height: 1.05;
+    color: var(--cta-fg);
+    max-width: 880px;
+    margin-bottom: 32px;
+  }
+  .slide.cta .headline em {
+    font-style: italic;
+    color: var(--cta-accent);
+  }
+  .slide.cta .subhead {
+    font-family: var(--sans);
+    font-size: 26px;
+    line-height: 1.38;
+    color: rgba(241, 240, 236, 0.75);
+    max-width: 820px;
+    margin-bottom: 64px;
+  }
+  .slide.cta .code-block {
+    margin-top: auto;
+    border: 2px solid rgba(241, 195, 118, 0.4);
+    border-radius: 10px;
+    padding: 36px 44px;
+    background: rgba(255, 255, 255, 0.03);
+    max-width: 880px;
+  }
+  .slide.cta .code-label {
+    font-family: var(--sans);
+    font-size: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: var(--cta-accent);
+    margin-bottom: 14px;
+  }
+  .slide.cta .code-word {
+    font-family: var(--sans);
+    font-size: 56px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--cta-fg);
+  }
+  .slide.cta .code-cta {
+    font-family: var(--sans);
+    font-size: 22px;
+    font-weight: 400;
+    color: rgba(241, 240, 236, 0.75);
+    margin-top: 14px;
+  }
+  .slide.cta .badge { background: var(--cta-fg); color: var(--cta-bg); }
+</style>
+</head>
+<body>
+
+<!-- ─── SLIDE 1 — COVER ──────────────────────────────────────────── -->
+<div class="slide cover" id="slide-1" data-slide="1">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="eyebrow">{{deck_eyebrow}}</div>
+  <h1 class="headline">{{slide_1_headline_html}}</h1>
+  <div class="subhead">{{slide_1_subhead}}</div>
+  <div class="author">{{deck_author}}</div>
+  <div class="badge">01 / {{deck_total}}</div>
+</div>
+
+<!-- ─── SLIDES 2..9 — BODY ───────────────────────────────────────── -->
+<div class="slide body" id="slide-2" data-slide="2">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="hook">{{slide_2_hook}}</div>
+  <div class="body-text">{{slide_2_body_html}}</div>
+  <div class="footnote">{{slide_2_footnote}}</div>
+  <div class="badge">02 / {{deck_total}}</div>
+</div>
+
+<div class="slide body" id="slide-3" data-slide="3">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="hook">{{slide_3_hook}}</div>
+  <div class="body-text">{{slide_3_body_html}}</div>
+  <div class="footnote">{{slide_3_footnote}}</div>
+  <div class="badge">03 / {{deck_total}}</div>
+</div>
+
+<div class="slide body quote" id="slide-4" data-slide="4">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="body-text">{{slide_4_body_html}}</div>
+  <div class="footnote">{{slide_4_footnote}}</div>
+  <div class="badge">04 / {{deck_total}}</div>
+</div>
+
+<div class="slide body" id="slide-5" data-slide="5">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="hook">{{slide_5_hook}}</div>
+  <div class="body-text">{{slide_5_body_html}}</div>
+  <div class="footnote">{{slide_5_footnote}}</div>
+  <div class="badge">05 / {{deck_total}}</div>
+</div>
+
+<div class="slide body" id="slide-6" data-slide="6">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="hook">{{slide_6_hook}}</div>
+  <div class="body-text">{{slide_6_body_html}}</div>
+  <div class="footnote">{{slide_6_footnote}}</div>
+  <div class="badge">06 / {{deck_total}}</div>
+</div>
+
+<div class="slide body quote" id="slide-7" data-slide="7">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="body-text">{{slide_7_body_html}}</div>
+  <div class="footnote">{{slide_7_footnote}}</div>
+  <div class="badge">07 / {{deck_total}}</div>
+</div>
+
+<div class="slide body" id="slide-8" data-slide="8">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="hook">{{slide_8_hook}}</div>
+  <div class="body-text">{{slide_8_body_html}}</div>
+  <div class="footnote">{{slide_8_footnote}}</div>
+  <div class="badge">08 / {{deck_total}}</div>
+</div>
+
+<div class="slide body" id="slide-9" data-slide="9">
+  <div class="brand">{{deck_brand}}</div>
+  <div class="hook">{{slide_9_hook}}</div>
+  <div class="body-text">{{slide_9_body_html}}</div>
+  <div class="footnote">{{slide_9_footnote}}</div>
+  <div class="badge">09 / {{deck_total}}</div>
+</div>
+
+<!-- ─── SLIDE 10 — CTA ───────────────────────────────────────────── -->
+<div class="slide cta" id="slide-10" data-slide="10">
+  <div class="brand">{{deck_brand}}</div>
+  <h2 class="headline">{{slide_10_headline_html}}</h2>
+  <div class="subhead">{{slide_10_subhead}}</div>
+  <div class="code-block">
+    <div class="code-label">Кодовое слово</div>
+    <div class="code-word">{{code_word_upper}}</div>
+    <div class="code-cta">{{slide_10_cta_text}}</div>
+  </div>
+  <div class="badge">10 / {{deck_total}}</div>
+</div>
+
+</body>
+</html>

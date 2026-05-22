@@ -6,7 +6,7 @@
 import type { Pool } from 'pg';
 import { log } from '../observability/logger.js';
 
-export type ImageProvider = 'gptunnel' | 'gemini' | 'replicate';
+export type ImageProvider = 'gptunnel' | 'gemini' | 'replicate' | 'html_puppeteer';
 export type ImageGenStatus = 'ok' | 'error';
 
 export interface RecordImageGenInput {

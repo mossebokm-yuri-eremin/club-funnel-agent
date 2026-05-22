@@ -371,21 +371,109 @@ export async function renderCarousel(
     'carousel-renderer: started',
   );
 
-  // Классификация темы (один раз).
-  const classifierInput = [idea.summary ?? '', ...slidesText].join('\n').slice(0, 4000);
-  const classification = await classifyCarouselTheme(classifierInput, voice);
-  log.info(
-    {
-      contentPackageId: pkg.id,
-      theme: classification.theme,
-      template: classification.templateFolderName,
-      by: classification.classifiedBy,
-    },
-    'carousel-renderer: theme classified',
-  );
+  // Override: если CAROUSEL_FORCE_TEMPLATE задан — пропускаем classify, используем фикс.
+  const forceTpl = config.CAROUSEL_FORCE_TEMPLATE;
+  let classification: { theme: string; templateFolderName: string; classifiedBy: 'regex' | 'llm' | 'fallback'; classifierRaw?: string };
+  if (forceTpl) {
+    classification = { theme: 'forced', templateFolderName: forceTpl, classifiedBy: 'fallback' };
+    log.info(
+      { contentPackageId: pkg.id, template: forceTpl, forced: true },
+      'carousel-renderer: theme classification SKIPPED (CAROUSEL_FORCE_TEMPLATE)',
+    );
+  } else {
+    const classifierInput = [idea.summary ?? '', ...slidesText].join('\n').slice(0, 4000);
+    classification = await classifyCarouselTheme(classifierInput, voice);
+    log.info(
+      {
+        contentPackageId: pkg.id,
+        theme: classification.theme,
+        template: classification.templateFolderName,
+        by: classification.classifiedBy,
+      },
+      'carousel-renderer: theme classified',
+    );
+  }
 
   // CAROUSEL_MODE switch (default = edit).
-  const mode = (config.CAROUSEL_MODE ?? 'edit') as 'edit' | 'style_transfer';
+  const mode = (config.CAROUSEL_MODE ?? 'edit') as 'html' | 'edit' | 'style_transfer';
+
+  if (mode === 'html') {
+    // Phase 14: HTML+Puppeteer pipeline.
+    const { renderCarouselHtml } = await import('../integrations/html-carousel-renderer.js');
+    // Достаём bonusTitle при необходимости.
+    let bonusTitle: string | undefined;
+    const bonusRes = await deps.pool.query<{ title: string }>(
+      `SELECT b.title FROM ideas i LEFT JOIN bonus_library b ON b.id = i.bonus_id WHERE i.id = $1`,
+      [idea.id],
+    );
+    if (bonusRes.rows[0]?.title) bonusTitle = bonusRes.rows[0].title;
+    if (!idea.summary) {
+      throw new Error('carousel-renderer[html]: idea.summary is null — cannot build payload');
+    }
+    const htmlInput: Parameters<typeof renderCarouselHtml>[1] = {
+      contentPackageId: pkg.id,
+      ideaId: idea.id,
+      slidesText,
+      ideaSummary: idea.summary,
+      painTag: idea.pain_tag ?? '',
+      strategy: (idea.summary && classification.classifiedBy === 'fallback') ? 'B' : 'B', // strategy уже выбрана в content-worker; читать из ideas.strategy
+      codeWord: 'preview', // будет переопределён через approval-callback; для smoke берём из env или фикс.
+    };
+    if (bonusTitle) htmlInput.bonusTitle = bonusTitle;
+
+    // Реально strategy + codeWord нужны → читаем из ideas + funnels.
+    const stratRes = await deps.pool.query<{ strategy: 'A' | 'B' | 'C' | null }>(
+      `SELECT strategy FROM ideas WHERE id = $1`,
+      [idea.id],
+    );
+    htmlInput.strategy = (stratRes.rows[0]?.strategy ?? 'B') as 'A' | 'B' | 'C';
+    const fnRes = await deps.pool.query<{ code_word: string }>(
+      `SELECT code_word FROM funnels WHERE idea_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [idea.id],
+    );
+    if (fnRes.rows[0]?.code_word) htmlInput.codeWord = fnRes.rows[0].code_word;
+
+    const htmlResult = await renderCarouselHtml(deps.pool, htmlInput, uploadFn);
+
+    // UPDATE content_packages.assets
+    await deps.pool.query(
+      `UPDATE content_packages
+         SET assets = COALESCE(assets, '{}'::jsonb) || $2::jsonb,
+             updated_at = NOW()
+       WHERE id = $1`,
+      [
+        pkg.id,
+        JSON.stringify({
+          slides: htmlResult.slides.map((r) => r.url),
+          slides_meta: htmlResult.slides.map((r) => ({
+            index: r.index,
+            url: r.url,
+            source: r.source,
+            public_id: r.publicId,
+          })),
+          template: {
+            theme: classification.theme,
+            folder: classification.templateFolderName,
+            classified_by: classification.classifiedBy,
+            mode: 'html',
+            template_name: htmlResult.templateName,
+          },
+        }),
+      ],
+    );
+
+    return {
+      contentPackageId: pkg.id,
+      ideaId: idea.id,
+      slides: htmlResult.slides,
+      totalDurationMs: htmlResult.totalDurationMs,
+      theme: classification.theme,
+      templateFolderName: htmlResult.templateName,
+      classifiedBy: classification.classifiedBy,
+      mode: 'edit', // отчёт unifies under 'edit' for type-safe; в assets отдельное поле 'html'.
+    };
+  }
+
   if (mode === 'edit') {
     return renderViaEdit(
       deps.pool,
@@ -403,6 +491,6 @@ export async function renderCarousel(
   // Legacy: старый style_transfer flow (если CAROUSEL_MODE=style_transfer).
   throw new Error(
     `carousel-renderer: CAROUSEL_MODE=${mode} not implemented in this code path. ` +
-      `Use CAROUSEL_MODE=edit or restore style_transfer impl.`,
+      `Use CAROUSEL_MODE=html or edit.`,
   );
 }

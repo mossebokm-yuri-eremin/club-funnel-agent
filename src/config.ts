@@ -79,7 +79,10 @@ const ConfigSchema = z.object({
    *   • хочется быстрых брендированных слайдов без расходов на AI.
    * Если флаг не задан, шаблоны используются автоматически когда включён PLACEHOLDER_MODE.
    */
-    CAROUSEL_MODE: z.enum(["edit", "style_transfer"]).default("edit"),
+      /** Override classify: если задано — все карусели рендерятся с этого шаблона (любой voice). */
+  CAROUSEL_FORCE_TEMPLATE: z.string().optional(),
+    CAROUSEL_HTML_TEMPLATE: z.string().default("yury-universal-v1"),
+  CAROUSEL_MODE: z.enum(["html", "edit", "style_transfer"]).default("edit"),
   GPTUNNEL_EDIT_MODEL: z.string().default("nano-banana-2"),
   CAROUSEL_EDIT_CONCURRENCY: z.coerce.number().int().default(4),
   CAROUSEL_TEMPLATES_LOCAL_DIR: z.string().default("/var/www/cdn/templates"),
