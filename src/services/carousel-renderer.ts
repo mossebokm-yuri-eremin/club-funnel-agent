@@ -1,12 +1,18 @@
 // carousel-renderer — оркестрация рендера каруселей (SPEC §2.7 AC-19..21).
 //
-// Phase 9 (style-transfer):
-//   1. Читаем content_packages — берём voice_code, carousel_slides (JSON массив строк), idea.
-//   2. ОДИН раз классифицируем тему карусели (regex + Haiku fallback) → имя папки эталона в GDrive.
-//   3. ОДИН раз скачиваем reference-слайды (cover/body/cta) + опц. портрет + past-post.
-//   4. Для каждого слайда: Seedream-4 через GPTunnel со style-reference (images[]) →
-//      Sharp overlay русского текста → 1080×1350 JPG → upload (Cloudinary/local).
-//   5. UPDATE content_packages.assets, INSERT в carousel_template_usage.
+// Phase 12 (edit-mode через nano-banana-2):
+//   1. Читаем content_packages → voice_code, carousel_slides[], idea.
+//   2. ОДИН раз classifyCarouselTheme → имя эталонной папки (carousel-03-money …).
+//   3. Берём кэшированные эталонные слайды из БД carousel_template_slides
+//      (заранее залиты template-sync в /var/www/cdn/templates/, nginx раздаёт).
+//   4. Для каждого нового слайда: nano-banana-2.editImage с base=<эталон.slide_N>
+//      → результат скачиваем, кладём в /var/www/cdn/<ideaId>/carousel-NN.jpg.
+//   5. Параллельно через Promise.all (с лимитом concurrency).
+//   6. UPDATE content_packages.assets, INSERT в carousel_template_usage.
+//
+// CAROUSEL_MODE flag:
+//   'edit'            — nano-banana-2 edit от эталона (текущая стратегия)
+//   'style_transfer'  — старая Seedream-4 + style refs (fallback, не используется)
 //
 // Voice-validator НЕ применяем (это бинарь, не текст).
 
@@ -14,12 +20,8 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { uploadCarouselImage } from '../integrations/cloudinary.js';
 import { log } from '../observability/logger.js';
+import { config } from '../config.js';
 import { classifyCarouselTheme, type VoiceCode } from './theme-classifier.js';
-import {
-  selectCarouselReferences,
-  type SelectedTemplate,
-  type TemplateSlideRef,
-} from './carousel-template-selector.js';
 
 export interface CarouselRendererInput {
   contentPackageId: string;
@@ -39,12 +41,10 @@ export interface CarouselRendererResult {
   ideaId: string;
   slides: RenderedSlide[];
   totalDurationMs: number;
-  /** Тема (для approval-notifier «✨ Вдохновлено: …»). */
   theme?: string;
-  /** Имя папки эталона в GDrive. */
   templateFolderName?: string;
-  /** 'regex' | 'llm' | 'fallback'. */
   classifiedBy?: 'regex' | 'llm' | 'fallback';
+  mode?: 'edit' | 'style_transfer';
 }
 
 export interface CarouselRendererDeps {
@@ -67,20 +67,10 @@ interface IdeaRow {
   summary: string | null;
 }
 
-async function fetchPackage(pool: Pool, id: string): Promise<ContentPackageRow | null> {
-  const r = await pool.query<ContentPackageRow>(
-    `SELECT id, idea_id, voice_code, carousel_slides FROM content_packages WHERE id = $1`,
-    [id],
-  );
-  return r.rows[0] ?? null;
-}
-
-async function fetchIdea(pool: Pool, id: string): Promise<IdeaRow | null> {
-  const r = await pool.query<IdeaRow>(
-    `SELECT id, pain_tag, summary FROM ideas WHERE id = $1`,
-    [id],
-  );
-  return r.rows[0] ?? null;
+interface TemplateSlideRow {
+  slide_number: number;
+  public_url: string;
+  drive_file_id: string;
 }
 
 function parseSlides(value: unknown): string[] {
@@ -92,122 +82,116 @@ function normalizeVoice(code: string): VoiceCode {
   return code === 'RZ' ? 'RZ' : 'YE';
 }
 
-export async function renderCarousel(
-  input: CarouselRendererInput,
-  deps: CarouselRendererDeps,
+function pickBaseSlide(
+  templates: TemplateSlideRow[],
+  newSlideIndex: number,
+  isCover: boolean,
+  isCta: boolean,
+): TemplateSlideRow {
+  // Базовая логика: slide N в новой карусели → slide N в эталоне.
+  // Если в эталоне меньше слайдов — циклим. Cover/CTA пытаемся подобрать первый/последний.
+  if (templates.length === 0) throw new Error('pickBaseSlide: no templates');
+  if (isCover) return templates[0]!;
+  if (isCta) return templates[templates.length - 1]!;
+  // Body: prefer same index, fallback by modulo.
+  const idx = (newSlideIndex - 1) % templates.length;
+  return templates[idx]!;
+}
+
+function buildEditPrompt(slideText: string, slideIndex: number, totalSlides: number): string {
+  const role =
+    slideIndex === 1
+      ? 'cover'
+      : slideIndex === totalSlides && totalSlides > 1
+        ? 'call-to-action'
+        : 'body';
+  return [
+    `Replace the Russian text on this carousel ${role} slide with the new Russian text below.`,
+    `New text: «${slideText}»`,
+    '',
+    'CRITICAL — text must FIT inside the original text area:',
+    '- Adjust font size DOWN if the new text is longer than the original, so EVERY character including first and last letter stays fully inside the safe area (do not let any letter touch or cross the edge).',
+    '- Keep word wrapping (break onto multiple lines) so the line length matches the original layout.',
+    '- Do NOT enlarge the text area — work within the same bounding box as the original.',
+    '- Keep at least 60 px of padding from all four edges of the canvas.',
+    '',
+    'Preserve EVERYTHING else exactly: layout, design elements, colors, fonts, photos, illustrations, composition, background, watermark, page-number indicator.',
+    'Match the original typography style — same font family, weight, color, alignment, hierarchy. Only font SIZE may shrink to fit.',
+    'Only the text content changes. Do not regenerate or alter photos/illustrations/background.',
+  ].join('\n');
+}
+
+async function renderViaEdit(
+  pool: Pool,
+  pkg: ContentPackageRow,
+  idea: IdeaRow,
+  slidesText: string[],
+  voice: VoiceCode,
+  theme: string,
+  templateFolderName: string,
+  classifiedBy: 'regex' | 'llm' | 'fallback',
+  uploadFn: typeof uploadCarouselImage,
 ): Promise<CarouselRendererResult> {
   const started = Date.now();
-  const uploadFn = deps.uploadFn ?? uploadCarouselImage;
-
-  const pkg = await fetchPackage(deps.pool, input.contentPackageId);
-  if (!pkg) throw new Error(`carousel-renderer: content_package ${input.contentPackageId} not found`);
-
-  const idea = await fetchIdea(deps.pool, pkg.idea_id);
-  if (!idea) throw new Error(`carousel-renderer: idea ${pkg.idea_id} not found`);
-
-  const slidesText = parseSlides(pkg.carousel_slides);
   const totalSlides = slidesText.length;
-  const voice = normalizeVoice(pkg.voice_code);
+  const voiceLower = voice.toLowerCase();
 
-  log.info(
-    { contentPackageId: pkg.id, ideaId: idea.id, totalSlides, voice },
-    'carousel-renderer: started',
+  // 1. Берём эталонные слайды из БД.
+  const tplRes = await pool.query<TemplateSlideRow>(
+    `SELECT slide_number, public_url, drive_file_id
+       FROM carousel_template_slides
+      WHERE voice = $1 AND carousel_name = $2
+      ORDER BY slide_number ASC`,
+    [voiceLower, templateFolderName],
   );
-
-  // ─── 1) Классификация темы (один раз на карусель) ─────────────────────────
-  const classifierInput = [idea.summary ?? '', ...slidesText].join('\n').slice(0, 4000);
-  const classification = await classifyCarouselTheme(classifierInput, voice);
-  log.info(
-    {
-      contentPackageId: pkg.id,
-      theme: classification.theme,
-      template: classification.templateFolderName,
-      by: classification.classifiedBy,
-    },
-    'carousel-renderer: theme classified',
-  );
-
-  // ─── 2) Скачиваем reference-слайды (один раз на карусель) ─────────────────
-  let selected: SelectedTemplate | null = null;
-  try {
-    selected = await selectCarouselReferences({
-      templateFolderName: classification.templateFolderName,
-      voice,
-      includePortrait: true,
-      includePastPost: voice === 'YE',
-    });
-  } catch (err) {
-    log.warn(
-      { err: (err as Error).message, template: classification.templateFolderName },
-      'carousel-renderer: reference selection failed (continuing without refs)',
+  const templates = tplRes.rows;
+  if (templates.length === 0) {
+    throw new Error(
+      `renderViaEdit: no template slides in БД for voice=${voiceLower} carousel=${templateFolderName} — запусти sync-templates.ts`,
     );
   }
+  log.info(
+    { theme, templateFolderName, templateCount: templates.length, totalSlides },
+    'carousel-renderer[edit]: templates loaded',
+  );
 
-  const allRefs: TemplateSlideRef[] = selected?.refs ?? [];
-  const styleRefs = allRefs.filter((r) => r.role === 'cover' || r.role === 'body' || r.role === 'cta');
-  const portraitRef = allRefs.find((r) => r.role === 'portrait');
-  const pastPostRef = allRefs.find((r) => r.role === 'past-post');
-
-  // ─── 3) Загрузка тяжёлых модулей (один раз) ───────────────────────────────
-  const [
-    { generateGptunnelImage, downloadGptunnelImage },
-    { buildSeedreamVisualPrompt },
-    { overlayTextOnImage },
-    { recordImageGeneration },
-  ] = await Promise.all([
+  // 2. Подгружаем editImage + Sharp resize.
+  const [{ editImage, downloadGptunnelImage }, { recordImageGeneration }, sharp] = await Promise.all([
     import('../integrations/gptunnel-creative.js'),
-    import('../prompts/carousel-image.v1.js'),
-    import('./text-overlay.js'),
     import('./image-billing.js'),
+    import('sharp').then((m) => m.default),
   ]);
 
-  const rendered: RenderedSlide[] = [];
+  const editModel = (config.GPTUNNEL_EDIT_MODEL ?? 'nano-banana-2') as
+    | 'nano-banana'
+    | 'nano-banana-2'
+    | 'gpt-image-1.5-low';
+  const concurrency = Math.max(1, Math.min(10, config.CAROUSEL_EDIT_CONCURRENCY ?? 4));
 
-  for (let i = 0; i < slidesText.length; i++) {
-    const slideText = slidesText[i];
-    if (!slideText) continue;
+  // 3. Параллельно рендерим слайды (Promise pool).
+  const tasks: Array<() => Promise<RenderedSlide>> = slidesText.map((slideText, i) => async () => {
+    if (!slideText) throw new Error(`slide ${i + 1} empty`);
     const slideIndex = i + 1;
-    const slideStarted = Date.now();
     const isCover = slideIndex === 1;
     const isCta = slideIndex === totalSlides && totalSlides > 1;
+    const base = pickBaseSlide(templates, slideIndex, isCover, isCta);
+    const prompt = buildEditPrompt(slideText, slideIndex, totalSlides);
+    const slideStarted = Date.now();
 
-    // Reference set для слайда:
-    //   cover  — все style-refs + portrait + past-post (стиль + лицо + узнаваемый бренд)
-    //   cta    — все style-refs (хочется CTA как в эталоне)
-    //   body   — только body-ref + past-post (минимально, чтоб не тянуть лица в каждый слайд)
-    let refSet: TemplateSlideRef[];
-    if (isCover) {
-      refSet = [...styleRefs, ...(portraitRef ? [portraitRef] : []), ...(pastPostRef ? [pastPostRef] : [])];
-    } else if (isCta) {
-      refSet = styleRefs;
-    } else {
-      const bodyRef = styleRefs.find((r) => r.role === 'body') ?? styleRefs[0];
-      refSet = [...(bodyRef ? [bodyRef] : []), ...(pastPostRef ? [pastPostRef] : [])];
-    }
-    const referenceImages = refSet.map((r) => r.dataUrl);
-
-    const visualPrompt = buildSeedreamVisualPrompt({
-      slideText,
-      slideIndex,
-      totalSlides,
-      painTag: idea.pain_tag ?? '',
-    });
-
-    let gen: Awaited<ReturnType<typeof generateGptunnelImage>>;
+    let edit: Awaited<ReturnType<typeof editImage>>;
     try {
-      gen = await generateGptunnelImage({
-        prompt: visualPrompt,
-        aspectRatio: '9:16',
-        size: '2K',
-        referenceImages,
+      edit = await editImage({
+        model: editModel,
+        prompt,
+        imageUrls: [base.public_url],
       });
     } catch (err) {
-      await recordImageGeneration(deps.pool, {
+      await recordImageGeneration(pool, {
         contentPackageId: pkg.id,
         slideNumber: slideIndex,
-        model: 'seedream-4',
+        model: editModel,
         provider: 'gptunnel',
-        prompt: visualPrompt,
+        prompt,
         costKopecks: 0,
         ...(idea.pain_tag ? { painTag: idea.pain_tag } : {}),
         status: 'error',
@@ -216,64 +200,73 @@ export async function renderCarousel(
       throw err;
     }
 
-    const rawPng = await downloadGptunnelImage(gen.imageUrl);
-    const overlay = await overlayTextOnImage({
-      imageBuffer: rawPng,
-      text: slideText,
-      slideIndex,
-      totalSlides,
-      ...(idea.pain_tag ? { painTag: idea.pain_tag } : {}),
-    });
+    // Скачиваем + ресайз до 1080×1350 JPG.
+    const raw = await downloadGptunnelImage(edit.imageUrl);
+    const finalJpg = await sharp(raw)
+      .resize(1080, 1350, { fit: 'cover' })
+      .jpeg({ quality: 90 })
+      .toBuffer();
 
-    await recordImageGeneration(deps.pool, {
-      contentPackageId: pkg.id,
-      slideNumber: slideIndex,
-      model: gen.modelUsed,
-      provider: 'gptunnel',
-      prompt: visualPrompt,
-      imageUrlExternal: gen.imageUrl,
-      generationId: gen.generationId,
-      costKopecks: gen.costKopecks,
-      durationMs: gen.durationMs,
-      bytes: overlay.bytes,
-      ...(idea.pain_tag ? { painTag: idea.pain_tag } : {}),
-      status: 'ok',
-    });
-
-    const composed = { jpg: overlay.jpg, meta: { bytes: overlay.bytes } };
     const uploaded = await uploadFn({
-      jpg: composed.jpg,
+      jpg: finalJpg,
       ideaId: idea.id,
       slideIndex,
       artifact: 'carousel',
     });
 
-    const slideDurationMs = Date.now() - slideStarted;
-    rendered.push({
-      index: slideIndex,
-      url: uploaded.url,
-      source: uploaded.source,
-      publicId: uploaded.publicId,
-      bytes: composed.meta.bytes,
-      durationMs: slideDurationMs,
+    await recordImageGeneration(pool, {
+      contentPackageId: pkg.id,
+      slideNumber: slideIndex,
+      model: edit.modelUsed,
+      provider: 'gptunnel',
+      prompt,
+      imageUrlExternal: edit.imageUrl,
+      generationId: edit.taskId,
+      costKopecks: edit.costKopecks,
+      durationMs: edit.durationMs,
+      bytes: finalJpg.length,
+      ...(idea.pain_tag ? { painTag: idea.pain_tag } : {}),
+      status: 'ok',
     });
 
     log.info(
       {
         contentPackageId: pkg.id,
         slideIndex,
+        baseSlide: base.slide_number,
         url: uploaded.url,
-        bytes: composed.meta.bytes,
-        refsUsed: referenceImages.length,
-        costKopecks: gen.costKopecks,
-        durationMs: slideDurationMs,
+        bytes: finalJpg.length,
+        costKopecks: edit.costKopecks,
+        durationMs: Date.now() - slideStarted,
       },
-      'carousel-renderer: slide rendered',
+      'carousel-renderer[edit]: slide rendered',
     );
-  }
 
-  // ─── 4) UPDATE content_packages.assets ────────────────────────────────────
-  await deps.pool.query(
+    return {
+      index: slideIndex,
+      url: uploaded.url,
+      source: uploaded.source,
+      publicId: uploaded.publicId,
+      bytes: finalJpg.length,
+      durationMs: Date.now() - slideStarted,
+    };
+  });
+
+  // Concurrency-limited execution.
+  const rendered: RenderedSlide[] = [];
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    while (cursor < tasks.length) {
+      const my = cursor++;
+      const task = tasks[my]!;
+      const result = await task();
+      rendered[my] = result;
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  // 4. UPDATE content_packages.assets
+  await pool.query(
     `UPDATE content_packages
        SET assets = COALESCE(assets, '{}'::jsonb) || $2::jsonb,
            updated_at = NOW()
@@ -289,17 +282,19 @@ export async function renderCarousel(
           public_id: r.publicId,
         })),
         template: {
-          theme: classification.theme,
-          folder: classification.templateFolderName,
-          classified_by: classification.classifiedBy,
+          theme,
+          folder: templateFolderName,
+          classified_by: classifiedBy,
+          mode: 'edit',
+          model: editModel,
         },
       }),
     ],
   );
 
-  // ─── 5) Аналитика использования шаблонов ──────────────────────────────────
+  // 5. Аналитика.
   try {
-    await deps.pool.query(
+    await pool.query(
       `INSERT INTO carousel_template_usage
          (content_package_id, voice_code, theme, template_folder,
           reference_slide_ids, classified_by_llm, classifier_raw)
@@ -307,17 +302,17 @@ export async function renderCarousel(
       [
         pkg.id,
         voice,
-        classification.theme,
-        classification.templateFolderName,
-        allRefs.map((r) => r.fileId),
-        classification.classifiedBy === 'llm',
-        classification.classifierRaw ?? null,
+        theme,
+        templateFolderName,
+        templates.map((t) => t.drive_file_id),
+        classifiedBy === 'llm',
+        null,
       ],
     );
   } catch (err) {
     log.warn(
       { err: (err as Error).message, contentPackageId: pkg.id },
-      'carousel-renderer: failed to log carousel_template_usage (non-fatal)',
+      'carousel-renderer[edit]: failed to log carousel_template_usage (non-fatal)',
     );
   }
 
@@ -327,11 +322,13 @@ export async function renderCarousel(
       contentPackageId: pkg.id,
       ideaId: idea.id,
       slidesRendered: rendered.length,
-      theme: classification.theme,
-      template: classification.templateFolderName,
+      theme,
+      template: templateFolderName,
+      model: editModel,
+      concurrency,
       totalDurationMs,
     },
-    'carousel-renderer: done',
+    'carousel-renderer[edit]: done',
   );
 
   return {
@@ -339,8 +336,73 @@ export async function renderCarousel(
     ideaId: idea.id,
     slides: rendered,
     totalDurationMs,
-    theme: classification.theme,
-    templateFolderName: classification.templateFolderName,
-    classifiedBy: classification.classifiedBy,
+    theme,
+    templateFolderName,
+    classifiedBy,
+    mode: 'edit',
   };
+}
+
+export async function renderCarousel(
+  input: CarouselRendererInput,
+  deps: CarouselRendererDeps,
+): Promise<CarouselRendererResult> {
+  const uploadFn = deps.uploadFn ?? uploadCarouselImage;
+
+  const pkgRes = await deps.pool.query<ContentPackageRow>(
+    `SELECT id, idea_id, voice_code, carousel_slides FROM content_packages WHERE id = $1`,
+    [input.contentPackageId],
+  );
+  const pkg = pkgRes.rows[0];
+  if (!pkg) throw new Error(`carousel-renderer: content_package ${input.contentPackageId} not found`);
+
+  const ideaRes = await deps.pool.query<IdeaRow>(
+    `SELECT id, pain_tag, summary FROM ideas WHERE id = $1`,
+    [pkg.idea_id],
+  );
+  const idea = ideaRes.rows[0];
+  if (!idea) throw new Error(`carousel-renderer: idea ${pkg.idea_id} not found`);
+
+  const slidesText = parseSlides(pkg.carousel_slides);
+  const voice = normalizeVoice(pkg.voice_code);
+
+  log.info(
+    { contentPackageId: pkg.id, ideaId: idea.id, totalSlides: slidesText.length, voice },
+    'carousel-renderer: started',
+  );
+
+  // Классификация темы (один раз).
+  const classifierInput = [idea.summary ?? '', ...slidesText].join('\n').slice(0, 4000);
+  const classification = await classifyCarouselTheme(classifierInput, voice);
+  log.info(
+    {
+      contentPackageId: pkg.id,
+      theme: classification.theme,
+      template: classification.templateFolderName,
+      by: classification.classifiedBy,
+    },
+    'carousel-renderer: theme classified',
+  );
+
+  // CAROUSEL_MODE switch (default = edit).
+  const mode = (config.CAROUSEL_MODE ?? 'edit') as 'edit' | 'style_transfer';
+  if (mode === 'edit') {
+    return renderViaEdit(
+      deps.pool,
+      pkg,
+      idea,
+      slidesText,
+      voice,
+      classification.theme,
+      classification.templateFolderName,
+      classification.classifiedBy,
+      uploadFn,
+    );
+  }
+
+  // Legacy: старый style_transfer flow (если CAROUSEL_MODE=style_transfer).
+  throw new Error(
+    `carousel-renderer: CAROUSEL_MODE=${mode} not implemented in this code path. ` +
+      `Use CAROUSEL_MODE=edit or restore style_transfer impl.`,
+  );
 }

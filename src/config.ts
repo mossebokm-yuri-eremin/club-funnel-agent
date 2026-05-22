@@ -79,6 +79,10 @@ const ConfigSchema = z.object({
    *   • хочется быстрых брендированных слайдов без расходов на AI.
    * Если флаг не задан, шаблоны используются автоматически когда включён PLACEHOLDER_MODE.
    */
+    CAROUSEL_MODE: z.enum(["edit", "style_transfer"]).default("edit"),
+  GPTUNNEL_EDIT_MODEL: z.string().default("nano-banana-2"),
+  CAROUSEL_EDIT_CONCURRENCY: z.coerce.number().int().default(4),
+  CAROUSEL_TEMPLATES_LOCAL_DIR: z.string().default("/var/www/cdn/templates"),
   CAROUSEL_USE_TEMPLATES: z
     .string()
     .default('false')
