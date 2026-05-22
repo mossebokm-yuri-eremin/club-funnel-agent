@@ -10,7 +10,9 @@
 
 import type { Bot, Context } from 'grammy';
 import type { Pool } from 'pg';
+import { config } from '../config.js';
 import { log } from '../observability/logger.js';
+import { extractIgShortcode } from '../services/ig-caption-generator.js';
 import { detectReference, type DetectableMessage } from '../services/reference-detector.js';
 import {
   audioQueue,
@@ -352,20 +354,84 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                   'approval-callback: funnel-activator failed (non-fatal)',
                 );
               }
-              // Сообщение без parse_mode — `_` в code_word ломает Markdown entity-parser.
               if (r) {
+                // Генерим IG caption через Sonnet 4.6 + кэшируем в БД.
+                let caption = '(не удалось сгенерировать подпись — попробуй ещё раз позже)';
+                try {
+                  const ideaInfo = await opts.pool!.query<{
+                    summary: string | null;
+                    pain_tag: string | null;
+                    strategy: 'A' | 'B' | 'C' | null;
+                  }>(
+                    `SELECT summary, pain_tag, strategy FROM ideas WHERE id = $1`,
+                    [ideaIdForLog],
+                  );
+                  const idea = ideaInfo.rows[0];
+                  const bonusInfo = await opts.pool!.query<{ title: string }>(
+                    `SELECT b.title FROM ideas i LEFT JOIN bonus_library b ON b.id = i.bonus_id WHERE i.id = $1`,
+                    [ideaIdForLog],
+                  );
+                  if (idea?.strategy && idea.summary) {
+                    const { generateIgCaption } = await import('../services/ig-caption-generator.js');
+                    const ig = await generateIgCaption({
+                      ideaSummary: idea.summary,
+                      painTag: idea.pain_tag ?? '',
+                      strategy: idea.strategy,
+                      codeWord: r.codeWord,
+                      ...(bonusInfo.rows[0]?.title ? { bonusTitle: bonusInfo.rows[0].title } : {}),
+                    });
+                    caption = ig.caption;
+                    // Кэшируем caption в content_packages.assets для последующих копий.
+                    await opts.pool!.query(
+                      `UPDATE content_packages
+                         SET assets = COALESCE(assets, '{}'::jsonb) || $2::jsonb,
+                             updated_at = NOW()
+                       WHERE id = $1`,
+                      [pkgId, JSON.stringify({ ig_caption: ig.caption, ig_code_word: r.codeWord })],
+                    );
+                  }
+                } catch (err) {
+                  log.warn(
+                    { err: (err as Error).message, pkgId },
+                    'approval-callback: ig-caption generation failed (non-fatal)',
+                  );
+                }
+
+                const codeUpper = r.codeWord.toUpperCase();
                 const cpLine = r.chatplaceAutomationId
                   ? '✅ ' + r.chatplaceAutomationId.slice(0, 12)
                   : '⚠️ pending';
-                await ctx.reply(
-                  '🔗 Воронка активирована\n' +
-                    `code_word: ${r.codeWord}\n` +
-                    `funnel_id: ${r.funnelId.slice(0, 8)}\n` +
-                    `ChatPlace: ${cpLine}`,
+                const panel =
+                  '📸 КАРУСЕЛЬ ГОТОВА К ПУБЛИКАЦИИ\n\n' +
+                  '✅ Воронка активна (ChatPlace: ' + cpLine + ')\n' +
+                  '🔤 Кодовое слово: ' + codeUpper + '\n\n' +
+                  '📝 Подпись для Instagram:\n' +
+                  '————————————————————————\n' +
+                  caption +
+                  '\n————————————————————————\n\n' +
+                  '📋 Что делать:\n' +
+                  '1. Открой Instagram → Создать пост\n' +
+                  '2. Загрузи все 10 слайдов карусели\n' +
+                  '3. Скопируй подпись выше и вставь\n' +
+                  '4. Опубликуй\n' +
+                  '5. После публикации — пиши:  /published <ссылка на пост>';
+                const igKb: InlineKeyboard = {
+                  inline_keyboard: [
+                    [
+                      { text: '📋 Кодовое слово', callback_data: 'ig:code:' + r.funnelId },
+                      { text: '📋 Подпись',       callback_data: 'ig:caption:' + pkgId },
+                    ],
+                  ],
+                };
+                await sendMessageRaw(
+                  config.TELEGRAM_BOT_TOKEN,
+                  ctx.chat?.id ?? ctx.from!.id,
+                  panel,
+                  igKb,
                 ).catch((e) => {
                   log.warn(
                     { err: (e as Error).message },
-                    'approval-callback: confirm-reply send failed (non-fatal)',
+                    'approval-callback: IG panel send failed (non-fatal)',
                   );
                 });
               } else if (activateErr) {
@@ -451,6 +517,133 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
         'approval-callback: handler failed',
       );
       await ctx.answerCallbackQuery({ text: 'Ошибка, посмотри логи.' });
+    }
+  });
+
+  // ---- callback_query: IG publish helpers (Phase 13) ----
+  // ig:code:<funnelId>     — выдаёт code_word отдельным сообщением (для удобного копирования)
+  // ig:caption:<pkgId>     — выдаёт сохранённый IG caption отдельным сообщением
+  bot.callbackQuery(/^ig:(code|caption):([0-9a-fA-F-]{36})$/, async (ctx) => {
+    if (!isAuthorized(ctx, opts.allowedUserId)) {
+      await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
+      return;
+    }
+    if (!opts.pool) {
+      await ctx.answerCallbackQuery({ text: 'pool not wired' });
+      return;
+    }
+    const kind = ctx.match![1] as 'code' | 'caption';
+    const id = ctx.match![2] as string;
+    try {
+      if (kind === 'code') {
+        const r = await opts.pool.query<{ code_word: string }>(
+          `SELECT code_word FROM funnels WHERE id = $1`,
+          [id],
+        );
+        const cw = r.rows[0]?.code_word;
+        if (!cw) {
+          await ctx.answerCallbackQuery({ text: 'funnel not found' });
+          return;
+        }
+        await ctx.reply(cw.toUpperCase()).catch(() => {});
+        await ctx.answerCallbackQuery({ text: '📋 Code_word выдан' });
+      } else {
+        const r = await opts.pool.query<{ assets: unknown }>(
+          `SELECT assets FROM content_packages WHERE id = $1`,
+          [id],
+        );
+        const assets = r.rows[0]?.assets;
+        const caption =
+          assets && typeof assets === 'object'
+            ? (assets as Record<string, unknown>)['ig_caption']
+            : null;
+        if (typeof caption !== 'string' || caption.length === 0) {
+          await ctx.answerCallbackQuery({ text: 'caption not generated' });
+          return;
+        }
+        await ctx.reply(caption).catch(() => {});
+        await ctx.answerCallbackQuery({ text: '📋 Подпись выдана' });
+      }
+    } catch (err) {
+      log.error({ err: (err as Error).message, kind, id }, 'ig-callback: failed');
+      await ctx.answerCallbackQuery({ text: 'Ошибка' });
+    }
+  });
+
+  // ---- /published <url> — журналируем факт публикации в IG ----
+  bot.command('published', async (ctx) => {
+    if (!isAuthorized(ctx, opts.allowedUserId)) {
+      log.warn({ from: ctx.from?.id }, 'unauthorized: /published');
+      return;
+    }
+    if (!opts.pool) {
+      await ctx.reply('pool not wired');
+      return;
+    }
+    const text = ctx.message?.text ?? '';
+    const url = text.replace(/^\/published\s*/i, '').trim();
+    if (!url) {
+      await ctx.reply(
+        'Использование: /published <ссылка на пост IG>\nПример: /published https://www.instagram.com/p/CXxx12345/',
+      );
+      return;
+    }
+    const shortcode = extractIgShortcode(url);
+    if (!shortcode) {
+      await ctx.reply('Это не похоже на ссылку Instagram. Жду https://instagram.com/p/... или /reel/...');
+      return;
+    }
+    try {
+      // Достаём последний approved funnel этого юзера — связываем публикацию с ним.
+      const recent = await opts.pool.query<{
+        funnel_id: string;
+        idea_id: string;
+        content_package_id: string;
+        code_word: string;
+        caption: string | null;
+      }>(
+        `SELECT f.id AS funnel_id, f.idea_id, cp.id AS content_package_id, f.code_word,
+                (cp.assets->>'ig_caption') AS caption
+           FROM funnels f
+           JOIN content_packages cp ON cp.idea_id = f.idea_id
+          WHERE f.status = 'live' AND cp.approval_status = 'approved'
+          ORDER BY f.created_at DESC
+          LIMIT 1`,
+      );
+      const row = recent.rows[0];
+      if (!row) {
+        await ctx.reply('Не нашёл активной воронки. Сначала одобри карусель в боте.');
+        return;
+      }
+      const ins = await opts.pool.query<{ id: number }>(
+        `INSERT INTO ig_publications
+           (idea_id, content_package_id, funnel_id, post_url, ig_shortcode,
+            caption, code_word, published_by_tg_user)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (ig_shortcode) DO UPDATE
+           SET post_url = EXCLUDED.post_url, published_at = NOW()
+         RETURNING id`,
+        [
+          row.idea_id,
+          row.content_package_id,
+          row.funnel_id,
+          url,
+          shortcode,
+          row.caption,
+          row.code_word,
+          ctx.from!.id,
+        ],
+      );
+      log.info(
+        { id: ins.rows[0]?.id, shortcode, codeWord: row.code_word, ideaId: row.idea_id },
+        '/published: recorded',
+      );
+      await ctx.reply(
+        `✅ Записал в БД.\nshortcode: ${shortcode}\nfunnel: ${row.funnel_id.slice(0, 8)}\ncode_word: ${row.code_word.toUpperCase()}\n\nТеперь как только подписчик напишет в IG код в Direct — ChatPlace ведёт его в TG-бота → запустится прогрев.`,
+      );
+    } catch (err) {
+      log.error({ err: (err as Error).message, url }, '/published: failed');
+      await ctx.reply(`Ошибка записи: ${(err as Error).message.slice(0, 200)}`);
     }
   });
 
@@ -796,6 +989,39 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   });
 
   log.info('bot: handlers registered');
+}
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IG publication helpers (Phase 13).
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface InlineKeyboard {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+}
+
+async function sendMessageRaw(
+  token: string,
+  chatId: number,
+  text: string,
+  replyMarkup?: InlineKeyboard,
+): Promise<void> {
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    log.warn({ status: res.status, body: t.slice(0, 200) }, 'sendMessageRaw failed');
+  }
 }
 
 // ---- helpers ----
