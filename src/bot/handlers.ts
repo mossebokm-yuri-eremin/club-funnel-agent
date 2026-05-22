@@ -421,6 +421,10 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                       { text: '📋 Кодовое слово', callback_data: 'ig:code:' + r.funnelId },
                       { text: '📋 Подпись',       callback_data: 'ig:caption:' + pkgId },
                     ],
+                    [
+                      { text: '📥 Скачать ZIP',   callback_data: 'ig:zip:' + pkgId },
+                      { text: '✅ Опубликовал',   callback_data: 'ig:published:' + pkgId },
+                    ],
                   ],
                 };
                 await sendMessageRaw(
@@ -523,7 +527,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- callback_query: IG publish helpers (Phase 13) ----
   // ig:code:<funnelId>     — выдаёт code_word отдельным сообщением (для удобного копирования)
   // ig:caption:<pkgId>     — выдаёт сохранённый IG caption отдельным сообщением
-  bot.callbackQuery(/^ig:(code|caption):([0-9a-fA-F-]{36})$/, async (ctx) => {
+  bot.callbackQuery(/^ig:(code|caption|zip|published):([0-9a-fA-F-]{36})$/, async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserId)) {
       await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
       return;
@@ -547,7 +551,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
         }
         await ctx.reply(cw.toUpperCase()).catch(() => {});
         await ctx.answerCallbackQuery({ text: '📋 Code_word выдан' });
-      } else {
+      } else if (kind === 'caption') {
         const r = await opts.pool.query<{ assets: unknown }>(
           `SELECT assets FROM content_packages WHERE id = $1`,
           [id],
@@ -563,6 +567,41 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
         }
         await ctx.reply(caption).catch(() => {});
         await ctx.answerCallbackQuery({ text: '📋 Подпись выдана' });
+      } else if (kind === 'zip') {
+        // Собираем zip из 10 carousel-*.jpg на лету через child_process.
+        const r = await opts.pool.query<{ idea_id: string; assets: unknown }>(
+          `SELECT idea_id, assets FROM content_packages WHERE id = $1`,
+          [id],
+        );
+        const row = r.rows[0];
+        if (!row) {
+          await ctx.answerCallbackQuery({ text: 'package not found' });
+          return;
+        }
+        try {
+          const { mkdir } = await import('node:fs/promises');
+          const { execFile } = await import('node:child_process');
+          const { promisify } = await import('node:util');
+          const execFileP = promisify(execFile);
+          const ideaDir = `/var/www/cdn/${row.idea_id}`;
+          const zipDir = '/var/www/cdn/zips';
+          await mkdir(zipDir, { recursive: true });
+          const zipPath = `${zipDir}/carousel-${id.slice(0, 8)}.zip`;
+          // -j flat (no path), -q quiet
+          await execFileP('zip', ['-j', '-q', zipPath, ...Array.from({ length: 10 }, (_, i) => `${ideaDir}/carousel-${String(i + 1).padStart(2, '0')}.jpg`)]);
+          const url = `https://agent.yury-eremin.ru/cdn/zips/carousel-${id.slice(0, 8)}.zip`;
+          await ctx.reply('📥 ZIP-архив: ' + url).catch(() => {});
+          await ctx.answerCallbackQuery({ text: '📥 ZIP готов' });
+        } catch (err) {
+          log.error({ err: (err as Error).message, pkgId: id }, 'ig:zip failed');
+          await ctx.reply('Не удалось собрать ZIP: ' + (err as Error).message.slice(0, 200)).catch(() => {});
+          await ctx.answerCallbackQuery({ text: 'ошибка ZIP' });
+        }
+      } else if (kind === 'published') {
+        await ctx.reply(
+          'Окей. После публикации в Instagram пришли:\n\n/published https://www.instagram.com/p/XXXX/\n\n(скопируй полную ссылку на пост, я свяжу её с воронкой и буду ждать первого подписчика)'
+        ).catch(() => {});
+        await ctx.answerCallbackQuery({ text: '👍' });
       }
     } catch (err) {
       log.error({ err: (err as Error).message, kind, id }, 'ig-callback: failed');
