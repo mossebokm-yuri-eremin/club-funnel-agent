@@ -120,6 +120,12 @@ const ConfigSchema = z.object({
     .default('true')
     .transform((v) => v === 'true' || v === '1'),
 
+  // --- Club (post-payment) ---
+  /** Invite-ссылка приватного TG-чата клуба «Реализация». Бот шлёт её подписчику сразу после оплаты. */
+  CLUB_TG_INVITE_URL: z.string().url().optional(),
+  /** Название клуба для текста приветствия (по умолчанию «Реализация»). */
+  CLUB_TG_GROUP_NAME: z.string().default('Реализация'),
+
   // --- Telegram ---
   TELEGRAM_BOT_TOKEN: z.string().min(1, 'TELEGRAM_BOT_TOKEN required'),
   TELEGRAM_BOT_USERNAME: z.string().optional(),

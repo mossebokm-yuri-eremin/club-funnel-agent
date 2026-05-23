@@ -131,18 +131,42 @@ async function processBatch(deps: GcParserDeps): Promise<{ processed: number; cl
           source: 'getcourse_webhook',
         });
         try {
-          await deps.pool.query(
-            `INSERT INTO subscribers (email, phone, status, club_paid_at, notes)
-               VALUES ($1, $2, 'paid', COALESCE($3::timestamptz, NOW()), $4)
-             ON CONFLICT (lower(email)) WHERE email IS NOT NULL AND deleted_at IS NULL
-               DO UPDATE
-                  SET phone = COALESCE(EXCLUDED.phone, subscribers.phone),
-                      status = 'paid',
-                      club_paid_at = COALESCE(EXCLUDED.club_paid_at, subscribers.club_paid_at),
-                      last_seen_at = NOW(),
-                      notes = COALESCE(EXCLUDED.notes, subscribers.notes)`,
+          const upRes = await deps.pool.query<{ id: string; tg_user_id: string | null; club_paid_at_was: string | null }>(
+            `WITH upserted AS (
+               INSERT INTO subscribers (email, phone, status, club_paid_at, notes)
+                 VALUES ($1, $2, 'paid', COALESCE($3::timestamptz, NOW()), $4)
+               ON CONFLICT (lower(email)) WHERE email IS NOT NULL AND deleted_at IS NULL
+                 DO UPDATE
+                    SET phone = COALESCE(EXCLUDED.phone, subscribers.phone),
+                        status = 'paid',
+                        club_paid_at = COALESCE(subscribers.club_paid_at, EXCLUDED.club_paid_at),
+                        last_seen_at = NOW(),
+                        notes = COALESCE(EXCLUDED.notes, subscribers.notes)
+               RETURNING id, tg_user_id, (xmax = 0) AS was_inserted
+             )
+             SELECT id, tg_user_id::text, NULL::text AS club_paid_at_was FROM upserted`,
             [parsed.userEmail, parsed.userPhone, parsed.paidAt, notesJson],
           );
+          const sub = upRes.rows[0];
+          // Если у подписчика есть tg_user_id — шлём ему invite в чат клуба.
+          if (sub?.tg_user_id && config.CLUB_TG_INVITE_URL) {
+            await sendClubInviteToTg(sub.tg_user_id, parsed.userFullName ?? '').catch((err) => {
+              log.warn(
+                { rawId: row.id, tgUserId: sub.tg_user_id, err: (err as Error).message },
+                'gc-parser: club invite TG send failed (non-fatal)',
+              );
+            });
+          } else if (sub && !sub.tg_user_id) {
+            log.info(
+              { rawId: row.id, subscriberId: sub.id, email: parsed.userEmail },
+              'gc-parser: paid subscriber has no tg_user_id — manual onboarding needed',
+            );
+          } else if (sub?.tg_user_id && !config.CLUB_TG_INVITE_URL) {
+            log.warn(
+              { rawId: row.id },
+              'gc-parser: CLUB_TG_INVITE_URL not configured — paid subscriber will NOT receive auto-invite',
+            );
+          }
         } catch (err) {
           log.warn(
             { rawId: row.id, err: (err as Error).message },
@@ -238,4 +262,35 @@ async function notifyYuriClubPurchase(
     `UPDATE getcourse_raw_events SET notified_at = NOW() WHERE id = $1`,
     [rawId],
   );
+}
+
+
+// ─── post-payment helper: invite в TG-чат клуба ────────────────────────────
+async function sendClubInviteToTg(tgUserId: string | number, userName: string): Promise<void> {
+  const token = config.TELEGRAM_BOT_TOKEN;
+  const invite = config.CLUB_TG_INVITE_URL;
+  if (!token || !invite) return;
+  const name = userName.replace(/_/g, ' ').trim();
+  const greeting = name ? `${name}, ` : '';
+  const groupName = config.CLUB_TG_GROUP_NAME ?? 'Реализация';
+  const text =
+    `🎉 ${greeting}поздравляю!\n\n` +
+    `Оплата клуба «${groupName}» прошла. Вот ссылка чтобы вступить в закрытый чат:\n\n` +
+    `${invite}\n\n` +
+    `Внутри — еженедельные эфиры со мной, разборы проектов резидентов, чат единомышленников.\n\n` +
+    `Заходи. Юрий 🤝`;
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: tgUserId,
+      text,
+      disable_web_page_preview: false,
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`tg sendMessage HTTP ${res.status}: ${t.slice(0, 200)}`);
+  }
+  log.info({ tgUserId, groupName, inviteSet: !!invite }, 'gc-parser: club invite sent to subscriber');
 }
