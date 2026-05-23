@@ -166,10 +166,15 @@ export function parseGcPayload(raw: unknown): GcParsedPayment {
     pickString(deal, ['currency']) ??
     'RUB';
 
-  const paidAt =
+  const paidAtRaw =
     pickString(obj, ['payment_paid_at', 'paid_at', 'payment_date']) ??
     pickString(deal, ['paid_at']) ??
     null;
+  // URL-кодированный '+' в timestamp (часовой пояс) превращается в пробел —
+  // нормализуем «2026-05-23T11:58:13 00:00» → «2026-05-23T11:58:13+00:00».
+  const paidAt = paidAtRaw && /T\d{2}:\d{2}:\d{2} \d{2}:\d{2}$/.test(paidAtRaw)
+    ? paidAtRaw.replace(/ (\d{2}:\d{2})$/, '+$1')
+    : paidAtRaw;
 
   const userId =
     pickString(obj, ['user_id', 'gc_user_id', 'customer_id']) ??
