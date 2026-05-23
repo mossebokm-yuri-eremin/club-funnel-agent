@@ -158,6 +158,56 @@ async function buildHttpServer(): Promise<FastifyInstance> {
     }
   });
 
+  // ── Public longread render: GET /longread/:bonusId
+  //   Отдаёт HTML с body_md из bonus_library (markdown → html через простой парсер).
+  //   Защиты от приватных лонгридов нет — каждый кто знает bonus_id может прочитать.
+  app.get<{ Params: { bonusId: string } }>('/longread/:bonusId', async (req, reply) => {
+    const id = req.params.bonusId;
+    if (!/^[0-9a-f-]{36}$/.test(id)) {
+      reply.code(400);
+      return { error: 'invalid bonus id' };
+    }
+    const r = await pool.query<{ title: string; body_md: string; cover_image_url: string | null }>(
+      `SELECT title, body_md, cover_image_url FROM bonus_library WHERE id = $1 AND status = 'live' AND deleted_at IS NULL`,
+      [id],
+    );
+    const row = r.rows[0];
+    if (!row) {
+      reply.code(404);
+      return { error: 'longread not found' };
+    }
+    // Простой markdown → html (только заголовки, абзацы, **жир**, *курсив*).
+    const html = row.body_md
+      .replace(/^#### (.+)$/gm, '<h4>$1</h4>')
+      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .split(/\n{2,}/)
+      .map((p) => (p.match(/^<h\d>/) ? p : `<p>${p.trim()}</p>`))
+      .join('\n');
+    const safeTitle = row.title.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]!));
+    const cover = row.cover_image_url ? `<img src="${row.cover_image_url}" style="max-width:100%;border-radius:12px;margin-bottom:32px">` : '';
+    const fullHtml = `<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"><title>${safeTitle} — Юрий Еремин</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  body { font-family: 'Inter',-apple-system,sans-serif; max-width: 720px; margin: 0 auto; padding: 48px 24px 80px; color: #181818; background: #faf8f3; line-height: 1.6; font-size: 18px; }
+  h1 { font-size: 40px; line-height: 1.15; margin: 0 0 24px; color: #0f0f0f; }
+  h2 { font-size: 28px; margin: 40px 0 16px; color: #0f0f0f; }
+  h3 { font-size: 22px; margin: 32px 0 12px; }
+  p { margin: 0 0 18px; }
+  strong { font-weight: 700; }
+  em { font-style: italic; color: #b04a2f; }
+  footer { margin-top: 64px; padding-top: 32px; border-top: 1px solid #d3d0c8; color: #777; font-size: 14px; }
+</style></head>
+<body>${cover}<h1>${safeTitle}</h1>${html}
+<footer>Юрий Еремин · клуб «Реализация»</footer></body></html>`;
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    return fullHtml;
+  });
+
   // GetCourse webhook — пишет любой запрос в getcourse_raw_events, всегда 200.
   // Парсинг → getcourse-parser-worker.ts (раз в 10 сек).
   await app.register(getCourseWebhookPlugin, {

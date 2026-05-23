@@ -126,6 +126,12 @@ const ConfigSchema = z.object({
   /** Regex (substring case-insensitive) для распознавания клубного предложения по имени, если ID не задан. */
   CLUB_OFFER_NAME_MATCH: z.string().default('реализация'),
 
+  // --- Warmup chain customization ---
+  /** Публичный URL CDN на короткое видео-приветствие Юрия (90 сек, mp4/h264). */
+  YURI_GREETING_VIDEO_URL: z.string().url().optional(),
+  /** Базовый URL для рендера лонгридов: https://agent.yury-eremin.ru. */
+  LONGREAD_PUBLIC_BASE: z.string().url().optional(),
+
   // --- Club (post-payment) ---
   /** Invite-ссылка приватного TG-чата клуба «Реализация». Бот шлёт её подписчику сразу после оплаты. */
   CLUB_TG_INVITE_URL: z.string().url().optional(),
@@ -153,6 +159,8 @@ const ConfigSchema = z.object({
   CHATPLACE_WEBHOOK_TOKEN: z.string().optional(),
   /** UUID Instagram-бота в ChatPlace (узнать через MCP bots_list, один раз). */
   CHATPLACE_IG_BOT_ID: z.string().optional(),
+  /** UUID второго IG-бота в ChatPlace для voice=RZ (Виктория). Если не задан — RZ-воронка делается на том же IG что YE. */
+  CHATPLACE_RZ_BOT_ID: z.string().optional(),
   /** Override URL MCP-сервера (по умолчанию https://mcp.chatplace.io/mcp). */
   CHATPLACE_MCP_URL: z.string().url().optional(),
 

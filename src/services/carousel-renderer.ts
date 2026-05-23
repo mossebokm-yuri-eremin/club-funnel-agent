@@ -99,25 +99,30 @@ function pickBaseSlide(
 }
 
 function buildEditPrompt(slideText: string, slideIndex: number, totalSlides: number): string {
+  // Prompt v3: МИНИМАЛЬНЫЙ — никаких визуальных инструкций, только замена текста.
+  // Опытно установлено что любые упоминания стиля/композиции/цвета сбивают модель —
+  // она начинает «улучшать» дизайн вместо точного сохранения эталона.
   const role =
     slideIndex === 1
       ? 'cover'
       : slideIndex === totalSlides && totalSlides > 1
-        ? 'call-to-action'
+        ? 'final CTA'
         : 'body';
   return [
-    `Replace the Russian text on this carousel ${role} slide with the new Russian text below.`,
-    `New text: «${slideText}»`,
+    'TASK: Replace ONLY the Russian text on this carousel slide. Do not change anything else.',
     '',
-    'CRITICAL — text must FIT inside the original text area:',
-    '- Adjust font size DOWN if the new text is longer than the original, so EVERY character including first and last letter stays fully inside the safe area (do not let any letter touch or cross the edge).',
-    '- Keep word wrapping (break onto multiple lines) so the line length matches the original layout.',
-    '- Do NOT enlarge the text area — work within the same bounding box as the original.',
-    '- Keep at least 60 px of padding from all four edges of the canvas.',
+    `New Russian text for the ${role} slide:`,
+    `«${slideText}»`,
     '',
-    'Preserve EVERYTHING else exactly: layout, design elements, colors, fonts, photos, illustrations, composition, background, watermark, page-number indicator.',
-    'Match the original typography style — same font family, weight, color, alignment, hierarchy. Only font SIZE may shrink to fit.',
-    'Only the text content changes. Do not regenerate or alter photos/illustrations/background.',
+    'STRICT REQUIREMENTS:',
+    '1. Keep the background, photos, illustrations, colors, layout, typography style, watermarks, page numbers, brand handles — ALL IDENTICAL to the input image.',
+    '2. Adjust ONLY the font SIZE of the new text so it fits in the same text area as the original — do not change font family, weight, color, or alignment.',
+    '3. Maintain safe area: keep at least 60px padding from all edges, never crop letters.',
+    '4. If the input has Russian text — translate position and styling exactly to the new text.',
+    '5. If the new text is shorter — keep the same font size, do not enlarge to fill.',
+    '6. If the new text is longer — reduce font size proportionally, wrap onto multiple lines matching the original line-break pattern.',
+    '',
+    'OUTPUT: a single image identical to the input, with ONLY the text content changed.',
   ].join('\n');
 }
 

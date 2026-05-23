@@ -54,6 +54,8 @@ export interface ContentGenInput {
   kbExcerpts?: string;
   /** Открытия предыдущих одобренных пакетов как few-shot. */
   winningPatternsText?: string;
+  /** Реальные посты Юрия как образец стиля (yury_voice_samples). */
+  voiceSamplesText?: string;
 }
 
 export interface GeneratedArtifact {
@@ -123,9 +125,15 @@ function buildUserPrompt(spec: ArtifactSpec, input: ContentGenInput): string {
       parts.push(`  • ${w}`);
     }
   }
-  // Knowledge base — реальные цитаты/кейсы Юрия (Phase 7+). Снимает "общность" текстов.
+  // Voice samples — 3 реальных поста Юрия как образец стиля (yury_voice_samples).
+  // Sonnet ОБЯЗАН повторять приёмы (парцелляция, ритм, обороты), но не дословный текст.
+  if (input.voiceSamplesText && input.voiceSamplesText.trim()) {
+    parts.push('\n' + input.voiceSamplesText);
+  }
+  // Knowledge base — реальные цитаты/кейсы Юрия. Sonnet ДОЛЖЕН ссылаться на конкретные
+  // имена/цифры из этих выдержек (Анна, 50K→350K и т.п.), а не использовать абстракции.
   if (input.kbExcerpts && input.kbExcerpts.trim()) {
-    parts.push('\n' + input.kbExcerpts);
+    parts.push('\nЗНАНИЯ ЮРИЯ (используй имена и конкретные цифры отсюда, а не выдумывай):\n' + input.kbExcerpts);
   }
   if (input.winningPatternsText && input.winningPatternsText.trim()) {
     parts.push('\n' + input.winningPatternsText);

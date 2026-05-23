@@ -33,7 +33,11 @@ export interface ActivateFunnelResult {
 
 let cachedIgBotId: string | null = null;
 
-async function resolveIgBotId(): Promise<string | null> {
+async function resolveIgBotId(voice: 'YE' | 'RZ' = 'YE'): Promise<string | null> {
+  // voice='RZ' → CHATPLACE_RZ_BOT_ID (Виктория). Если не задан — fallback на YE.
+  if (voice === 'RZ' && config.CHATPLACE_RZ_BOT_ID) {
+    return config.CHATPLACE_RZ_BOT_ID;
+  }
   if (config.CHATPLACE_IG_BOT_ID) return config.CHATPLACE_IG_BOT_ID;
   if (cachedIgBotId) return cachedIgBotId;
   try {
@@ -136,7 +140,7 @@ export async function activateFunnelOnApprove(
   // 5. ChatPlace MCP.
   let chatplaceAutomationId: string | null = null;
   try {
-    const botId = await resolveIgBotId();
+    const botId = await resolveIgBotId('YE'); // TODO: pass voice from pkg
     if (!botId) {
       log.warn({ funnelId, codeWord }, 'funnel-activator: no IG bot, skipping ChatPlace setup');
     } else {

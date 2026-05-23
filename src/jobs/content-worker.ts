@@ -249,6 +249,44 @@ async function process(
       'content-worker: KB excerpts failed (continuing without)',
     );
   }
+
+  // Voice samples: 3 наиболее релевантных реальных поста Юрия (cosine similarity)
+  // как few-shot примеры стиля. Sonnet их использует как образец интонации/ритма.
+  let voiceSamplesText = '';
+  try {
+    const { createEmbedding } = await import('../integrations/openai.js');
+    const query = [idea.summary, idea.pain_tag].filter(Boolean).join(' ');
+    const qEmb = await createEmbedding(query);
+    const vectorLit = '[' + qEmb.embedding.join(',') + ']';
+    const samplesRes = await deps.pool.query<{ source_file: string; full_text: string; sim: number }>(
+      `SELECT source_file, full_text, 1 - (embedding <=> $1::vector) AS sim
+         FROM yury_voice_samples
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> $1::vector
+        LIMIT 3`,
+      [vectorLit],
+    );
+    if (samplesRes.rows.length > 0) {
+      const blocks = samplesRes.rows.map((r, i) =>
+        `--- ПРИМЕР ${i + 1} (sim=${r.sim.toFixed(2)}, ${r.source_file}) ---
+${r.full_text}`,
+      );
+      voiceSamplesText =
+        'РЕАЛЬНЫЕ ПОСТЫ ЮРИЯ — ИСПОЛЬЗУЙ ИХ КАК ЭТАЛОН РИТМА, ИНТОНАЦИИ И СТРУКТУРЫ ' +
+        '(не копируй дословно, но повторяй приёмы: парцелляция, однострочные абзацы, конкретные цифры, ' +
+        'характерные обороты «Так вот.», «И всё.», «Вот тогда —»):\n\n' +
+        blocks.join('\n\n');
+      log.info(
+        { ideaId: idea.id, samples: samplesRes.rows.length, topSim: samplesRes.rows[0]?.sim.toFixed(2) },
+        'content-worker: voice samples loaded',
+      );
+    }
+  } catch (err) {
+    log.warn(
+      { err: (err as Error).message },
+      'content-worker: voice samples failed (continuing without)',
+    );
+  }
   try {
     const { getLastWinningPatterns, formatWinningPatterns } = await import(
       '../services/winning-patterns.js'
@@ -279,6 +317,7 @@ async function process(
       style,
       kbExcerpts,
       winningPatternsText,
+      voiceSamplesText,
     },
     { pool: deps.pool },
   );
