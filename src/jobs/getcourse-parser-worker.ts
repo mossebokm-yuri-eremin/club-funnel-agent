@@ -114,7 +114,11 @@ async function processBatch(deps: GcParserDeps): Promise<{ processed: number; cl
       }
 
       // Проверяем — оплата нашего клуба?
-      const isClub = isClubPayment(parsed, config.GC_BASE_OFFER_ID ? String(config.GC_BASE_OFFER_ID) : null);
+      const isClub = isClubPayment(parsed, {
+        baseOfferId: config.GC_BASE_OFFER_ID ? String(config.GC_BASE_OFFER_ID) : null,
+        clubOfferIds: config.CLUB_OFFER_IDS,
+        clubOfferNameMatch: config.CLUB_OFFER_NAME_MATCH,
+      });
 
       // Upsert subscriber если есть email и это оплата клуба.
       // Текущая схема subscribers не имеет gc_user_id/name/utm_*, поэтому метаданные кладём

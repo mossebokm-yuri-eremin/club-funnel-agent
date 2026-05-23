@@ -226,9 +226,35 @@ export function parseGcPayload(raw: unknown): GcParsedPayment {
 }
 
 /** Принадлежит ли парсенное событие нашему клубу. */
-export function isClubPayment(parsed: GcParsedPayment, baseOfferId: string | null): boolean {
+export interface ClubMatchOptions {
+  /** legacy: одиночный ID; если задан и совпадает с productId — это клуб */
+  baseOfferId: string | null;
+  /** новый: список ID клубных предложений (CSV из env CLUB_OFFER_IDS) */
+  clubOfferIds?: readonly string[];
+  /** новый: substring (case-insensitive) для матчинга по имени предложения */
+  clubOfferNameMatch?: string;
+}
+
+export function isClubPayment(parsed: GcParsedPayment, opts: ClubMatchOptions | string | null): boolean {
   if (parsed.eventType !== 'club_purchased') return false;
-  if (!baseOfferId) return true; // если не задан конкретный offer — принимаем любой club_purchased
-  return parsed.productId === baseOfferId;
+  // backward compat: если передали строку — это baseOfferId
+  const o: ClubMatchOptions =
+    typeof opts === 'string' || opts === null
+      ? { baseOfferId: opts }
+      : opts;
+  // 1) совпадение по списку клубных offer IDs (новый путь)
+  if (o.clubOfferIds && o.clubOfferIds.length > 0 && parsed.productId && o.clubOfferIds.includes(parsed.productId)) {
+    return true;
+  }
+  // 2) legacy baseOfferId
+  if (o.baseOfferId && parsed.productId === o.baseOfferId) return true;
+  // 3) fallback по имени предложения
+  if (o.clubOfferNameMatch && parsed.productName) {
+    const needle = o.clubOfferNameMatch.toLowerCase();
+    if (parsed.productName.toLowerCase().includes(needle)) return true;
+  }
+  // 4) если вообще никакой фильтр не задан и это club_purchased — принимаем (старое поведение)
+  if (!o.clubOfferIds?.length && !o.baseOfferId && !o.clubOfferNameMatch) return true;
+  return false;
 }
 void pickNumber;

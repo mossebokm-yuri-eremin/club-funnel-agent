@@ -120,6 +120,12 @@ const ConfigSchema = z.object({
     .default('true')
     .transform((v) => v === 'true' || v === '1'),
 
+  // --- Club product matching (GC offers) ---
+  /** CSV ID-шников GC-предложений считающихся «оплатой клуба». Пример: "8313256,9123456". */
+  CLUB_OFFER_IDS: z.string().optional().transform((v) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [])),
+  /** Regex (substring case-insensitive) для распознавания клубного предложения по имени, если ID не задан. */
+  CLUB_OFFER_NAME_MATCH: z.string().default('реализация'),
+
   // --- Club (post-payment) ---
   /** Invite-ссылка приватного TG-чата клуба «Реализация». Бот шлёт её подписчику сразу после оплаты. */
   CLUB_TG_INVITE_URL: z.string().url().optional(),
