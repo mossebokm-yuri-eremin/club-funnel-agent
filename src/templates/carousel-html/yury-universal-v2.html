@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>{{deck_title}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@800;900&family=Inter:wght@400;500;600;700&family=Caveat:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #555; font-family: 'Inter', sans-serif; }
+
+  :root {
+    --bg: #efece4;                /* тёплый кремовый off-white */
+    --fg: #181818;                /* near-black */
+    --red: #e0432a;               /* алый акцент */
+    --blue: #1f3edc;              /* синий акцент */
+    --hand: #a8b8e0;              /* пастельно-голубой для handwriting */
+    --muted: #6a6a68;
+    --display: 'Big Shoulders Display', 'Arial Black', sans-serif;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --hand-font: 'Caveat', cursive;
+  }
+
+  .slide {
+    width: 1080px;
+    height: 1350px;
+    position: relative;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 64px 72px 72px 72px;
+    page-break-after: always;
+    margin: 0 0 32px 0;
+  }
+
+  /* ─── Common chrome ──────────────────────────────────────── */
+  .eyebrow {
+    position: absolute;
+    top: 64px; left: 72px;
+    font-family: var(--sans);
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    color: var(--red);
+    text-transform: uppercase;
+  }
+  .eyebrow.muted { color: var(--muted); }
+
+  .page-badge {
+    position: absolute;
+    top: 64px; right: 72px;
+    font-family: var(--sans);
+    font-size: 22px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    color: var(--fg);
+  }
+
+  .brand-handle {
+    position: absolute;
+    bottom: 56px; left: 72px;
+    font-family: var(--sans);
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--fg);
+    letter-spacing: 0.02em;
+  }
+
+  .arrow {
+    position: absolute;
+    bottom: 56px; right: 72px;
+    font-family: var(--display);
+    font-size: 56px;
+    font-weight: 900;
+    line-height: 0.8;
+    color: var(--fg);
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    background: var(--fg);
+    color: var(--bg);
+    padding: 18px 32px;
+    border-radius: 999px;
+    font-family: var(--sans);
+    font-size: 22px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+  .pill.uppercase { text-transform: uppercase; font-weight: 700; letter-spacing: 0.14em; font-size: 20px; }
+
+  /* Handwriting layer (декоративный текст за headline) */
+  .hand-layer {
+    position: absolute;
+    font-family: var(--hand-font);
+    font-weight: 700;
+    color: var(--hand);
+    z-index: 0;
+    user-select: none;
+    pointer-events: none;
+    transform: rotate(-6deg);
+    line-height: 0.9;
+  }
+
+  /* ─── Display headline ───────────────────────────────────── */
+  .display {
+    font-family: var(--display);
+    font-weight: 900;
+    line-height: 0.92;
+    letter-spacing: -0.005em;
+    text-transform: uppercase;
+    color: var(--fg);
+    z-index: 1;
+    position: relative;
+  }
+  .display .red  { color: var(--red); }
+  .display .blue { color: var(--blue); }
+
+  /* ─── COVER (slide 1) ────────────────────────────────────── */
+  .slide.cover .display {
+    font-size: 168px;
+    max-width: 720px;
+    margin-top: 130px;
+  }
+  .slide.cover .photo {
+    position: absolute;
+    top: 120px;
+    right: 0;
+    width: 560px;
+    height: 1120px;
+    background-image: var(--cover-photo);
+    background-size: cover;
+    background-position: center;
+    z-index: 0;
+    filter: grayscale(100%);
+  }
+  .slide.cover .photo.empty {
+    background: linear-gradient(135deg, #2a2a28, #4d4d4a);
+  }
+  .slide.cover .pill-wrap {
+    position: absolute;
+    bottom: 160px; left: 72px;
+    z-index: 2;
+  }
+
+  /* ─── BODY-NUMBERED (slide 2-9 with big colored number) ──── */
+  .slide.body-num .big-number {
+    font-family: var(--display);
+    font-weight: 900;
+    font-size: 480px;
+    line-height: 0.82;
+    color: var(--red);
+    position: absolute;
+    top: 160px; left: 72px;
+    letter-spacing: -0.04em;
+  }
+  .slide.body-num.blue .big-number { color: var(--blue); }
+  .slide.body-num .display {
+    font-size: 96px;
+    max-width: 620px;
+    position: absolute;
+    top: 260px; left: 460px;
+  }
+  .slide.body-num .body-text {
+    position: absolute;
+    bottom: 220px; left: 72px;
+    right: 72px;
+    font-family: var(--sans);
+    font-size: 30px;
+    font-weight: 400;
+    line-height: 1.32;
+    color: var(--fg);
+    max-width: 760px;
+  }
+  .slide.body-num .body-text strong { font-weight: 700; }
+  .slide.body-num .pill-wrap {
+    position: absolute;
+    bottom: 140px; right: 72px;
+    z-index: 2;
+  }
+  .slide.body-num .footer-italic {
+    position: absolute;
+    bottom: 110px; right: 110px;
+    font-family: var(--sans);
+    font-style: italic;
+    font-size: 22px;
+    color: var(--muted);
+    text-align: right;
+  }
+
+  /* ─── BODY-TEXT (pure text slide) ────────────────────────── */
+  .slide.body-text .display {
+    font-size: 132px;
+    margin-top: 160px;
+    max-width: 940px;
+  }
+  .slide.body-text .body-text {
+    position: absolute;
+    bottom: 280px; left: 72px;
+    right: 72px;
+    font-family: var(--sans);
+    font-size: 30px;
+    line-height: 1.32;
+    color: var(--fg);
+    max-width: 760px;
+  }
+  .slide.body-text .pill-wrap {
+    position: absolute;
+    bottom: 170px; left: 72px;
+  }
+
+  /* ─── BODY-QUOTE (pull-quote with handwriting overlay) ──── */
+  .slide.body-quote .display {
+    font-size: 116px;
+    margin-top: 180px;
+    max-width: 880px;
+  }
+  .slide.body-quote .hand-layer {
+    font-size: 260px;
+    top: 280px; left: 80px;
+    z-index: 0;
+  }
+
+  /* ─── CTA (slide 10) ─────────────────────────────────────── */
+  .slide.cta .display {
+    font-size: 152px;
+    max-width: 720px;
+    margin-top: 130px;
+  }
+  .slide.cta .display .red { color: var(--red); }
+  .slide.cta .photo {
+    position: absolute;
+    top: 120px; right: 0;
+    width: 560px; height: 1120px;
+    background-image: var(--cta-photo);
+    background-size: cover;
+    background-position: center;
+    filter: grayscale(100%);
+    z-index: 0;
+  }
+  .slide.cta .photo.empty {
+    background: linear-gradient(135deg, #2a2a28, #4d4d4a);
+  }
+  .slide.cta .hand-layer {
+    font-size: 220px;
+    top: 80px; left: 60px;
+    z-index: 0;
+  }
+  .slide.cta .body-text {
+    position: absolute;
+    bottom: 320px; left: 72px;
+    font-family: var(--sans);
+    font-size: 30px;
+    font-weight: 400;
+    line-height: 1.34;
+    color: var(--fg);
+    max-width: 440px;
+    z-index: 1;
+  }
+  .slide.cta .pill-wrap {
+    position: absolute;
+    bottom: 140px; left: 72px;
+    z-index: 2;
+  }
+  .slide.cta .pill {
+    background: var(--fg);
+    color: var(--bg);
+    font-size: 22px;
+    padding: 20px 36px;
+  }
+  .slide.cta .code-inline {
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+
+<!-- ─── 1. COVER (eyebrow BREAKING + huge headline + photo + pill) ─── -->
+<div class="slide cover" id="slide-1" style="--cover-photo: {{slide_1_photo_css}};">
+  <div class="eyebrow">{{slide_1_eyebrow}}</div>
+  <div class="page-badge">01 / {{deck_total}}</div>
+  <div class="photo {{slide_1_photo_empty}}"></div>
+  <h1 class="display">{{slide_1_headline_html}}</h1>
+  <div class="pill-wrap"><span class="pill">{{slide_1_pill}}</span></div>
+  <div class="brand-handle">{{deck_brand}}</div>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 2. BODY-NUMBERED red 01 ─── -->
+<div class="slide body-num" id="slide-2">
+  <div class="eyebrow muted">{{slide_2_eyebrow}}</div>
+  <div class="page-badge">02 / {{deck_total}}</div>
+  <div class="big-number">01</div>
+  <h2 class="display">{{slide_2_headline_html}}</h2>
+  <div class="body-text">{{slide_2_body_html}}</div>
+  <div class="footer-italic">{{slide_2_footer_italic}}</div>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 3. BODY-NUMBERED blue 02 ─── -->
+<div class="slide body-num blue" id="slide-3">
+  <div class="eyebrow muted">{{slide_3_eyebrow}}</div>
+  <div class="page-badge">03 / {{deck_total}}</div>
+  <div class="big-number">02</div>
+  <h2 class="display">{{slide_3_headline_html}}</h2>
+  <div class="body-text">{{slide_3_body_html}}</div>
+  <div class="pill-wrap"><span class="pill uppercase">{{slide_3_pill}} &nbsp;&rarr;</span></div>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 4. BODY-TEXT pure 3-line headline ─── -->
+<div class="slide body-text" id="slide-4">
+  <div class="eyebrow muted">{{slide_4_eyebrow}}</div>
+  <div class="page-badge">04 / {{deck_total}}</div>
+  <h2 class="display">{{slide_4_headline_html}}</h2>
+  <div class="body-text">{{slide_4_body_html}}</div>
+  <div class="pill-wrap"><span class="pill">{{slide_4_pill}} &nbsp;&rarr;</span></div>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 5. BODY-NUMBERED red 03 ─── -->
+<div class="slide body-num" id="slide-5">
+  <div class="eyebrow muted">{{slide_5_eyebrow}}</div>
+  <div class="page-badge">05 / {{deck_total}}</div>
+  <div class="big-number">03</div>
+  <h2 class="display">{{slide_5_headline_html}}</h2>
+  <div class="body-text">{{slide_5_body_html}}</div>
+  <div class="footer-italic">{{slide_5_footer_italic}}</div>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 6. BODY-QUOTE with handwriting layer ─── -->
+<div class="slide body-quote" id="slide-6">
+  <div class="eyebrow muted">{{slide_6_eyebrow}}</div>
+  <div class="page-badge">06 / {{deck_total}}</div>
+  <span class="hand-layer">{{slide_6_handwriting}}</span>
+  <h2 class="display">{{slide_6_headline_html}}</h2>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 7. BODY-TEXT with pill ─── -->
+<div class="slide body-text" id="slide-7">
+  <div class="eyebrow muted">{{slide_7_eyebrow}}</div>
+  <div class="page-badge">07 / {{deck_total}}</div>
+  <h2 class="display">{{slide_7_headline_html}}</h2>
+  <div class="body-text">{{slide_7_body_html}}</div>
+  <div class="pill-wrap"><span class="pill">{{slide_7_pill}} &nbsp;&rarr;</span></div>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 8. BODY-NUMBERED blue 04 ─── -->
+<div class="slide body-num blue" id="slide-8">
+  <div class="eyebrow muted">{{slide_8_eyebrow}}</div>
+  <div class="page-badge">08 / {{deck_total}}</div>
+  <div class="big-number">04</div>
+  <h2 class="display">{{slide_8_headline_html}}</h2>
+  <div class="body-text">{{slide_8_body_html}}</div>
+  <div class="footer-italic">{{slide_8_footer_italic}}</div>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 9. BODY-TEXT recap ─── -->
+<div class="slide body-text" id="slide-9">
+  <div class="eyebrow muted">{{slide_9_eyebrow}}</div>
+  <div class="page-badge">09 / {{deck_total}}</div>
+  <h2 class="display">{{slide_9_headline_html}}</h2>
+  <div class="body-text">{{slide_9_body_html}}</div>
+  <div class="pill-wrap"><span class="pill">{{slide_9_pill}} &nbsp;&rarr;</span></div>
+  <div class="arrow">&raquo;</div>
+</div>
+
+<!-- ─── 10. CTA — photo + СОХРАНИТЕ ЭТОТ ТЕСТ style ─── -->
+<div class="slide cta" id="slide-10" style="--cta-photo: {{slide_10_photo_css}};">
+  <div class="page-badge">10 / {{deck_total}}</div>
+  <span class="hand-layer">{{slide_10_handwriting}}</span>
+  <div class="photo {{slide_10_photo_empty}}"></div>
+  <h2 class="display">{{slide_10_headline_html}}</h2>
+  <div class="body-text">{{slide_10_body_html}}</div>
+  <div class="pill-wrap"><span class="pill">Пиши <span class="code-inline">{{code_word_upper}}</span> в Direct &nbsp;&rarr;</span></div>
+  <div class="brand-handle">{{deck_brand}}</div>
+</div>
+
+</body>
+</html>

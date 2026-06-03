@@ -21,13 +21,9 @@
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { callAnthropic } from '../integrations/anthropic.js';
-import { TWIN_YE_SYSTEM_PROMPT } from '../prompts/twin-ye.v2.js';
-import { TWIN_RZ_SYSTEM_PROMPT } from '../prompts/twin-rz.v2.js';
-import {
-  validateVoice,
-  type VoiceCode,
-  type VoiceValidatorReport,
-} from './voice-validator.js';
+import { buildTwinYePrompt } from '../prompts/twin-ye.js';
+import { buildTwinRzPrompt } from '../prompts/twin-rz.js';
+import { validateVoiceV3 } from './voice-validator-v3.js';
 import type { Strategy } from './strategy-chooser.js';
 import { config } from '../config.js';
 import { log } from '../observability/logger.js';
@@ -36,6 +32,41 @@ import {
   DEFAULT_STYLE,
   type ContentStyle,
 } from './user-preferences.js';
+
+export type VoiceCode = 'YE' | 'RZ';
+
+// Совместимость со старым формат VoiceValidatorReport — content_packages.validator_report
+// JSONB историчен. Маппер v3 → legacy.
+export interface VoiceValidatorReport {
+  voice_code: VoiceCode;
+  ok: boolean;
+  violations: Array<{ marker: string; positions: number[] }>;
+  missingMarkers: string[];
+  required_markers_found: Array<{ marker: string; count: number }>;
+  density_per_100w: number;
+  score: number;
+  word_count: number;
+  reason?: string;
+  suggestion?: string;
+}
+
+async function validateLegacy(text: string, voice: VoiceCode): Promise<VoiceValidatorReport> {
+  const v3 = await validateVoiceV3(text, { voice });
+  return {
+    voice_code: voice,
+    ok: v3.ok,
+    violations: v3.violations.map((vio) => ({
+      marker: vio.correction ? `${vio.marker} → ${vio.correction}` : vio.marker,
+      positions: [],
+    })),
+    missingMarkers: v3.missing_characteristics,
+    required_markers_found: [],
+    density_per_100w: v3.characteristic_hits,
+    score: v3.characteristic_hits,
+    word_count: v3.word_count,
+    ...(v3.reason ? { reason: v3.reason } : {}),
+  };
+}
 
 export interface ContentGenInput {
   ideaId: string;
@@ -179,18 +210,17 @@ function buildFeedback(report: VoiceValidatorReport): string {
   const lines: string[] = ['ПРОШЛАЯ ПОПЫТКА НЕ ПРОШЛА VOICE VALIDATOR.'];
   if (report.violations.length > 0) {
     lines.push(
-      `Запрещённые слова найдены: ${report.violations.map((v) => v.marker).join(', ')}. ` +
-        `Замени их живыми формулировками.`,
+      `Найдены проблемы: ${report.violations.map((v) => v.marker).join(' | ')}. ` +
+        `Перепиши, избегая указанных проблем.`,
     );
   }
-  if (report.density_per_100w < (config.VOICE_VALIDATOR_MIN_DENSITY ?? 0.3)) {
+  if (report.missingMarkers.length > 0 && report.density_per_100w < 2) {
     lines.push(
-      `Плотность маркеров ${report.density_per_100w} ниже ${config.VOICE_VALIDATOR_MIN_DENSITY}. ` +
-        `Добавь естественные вкрапления: ${report.missingMarkers.slice(0, 4).join(', ')}.`,
+      `Не хватает характерных оборотов. Добавь минимум 2 из: ${report.missingMarkers.slice(0, 6).join(', ')}.`,
     );
   }
   if (report.reason) lines.push(`Причина: ${report.reason}`);
-  lines.push('Сохрани содержание и структуру — поправь только язык. Не извиняйся.');
+  lines.push('Сохрани содержание и структуру — поправь только язык. Не извиняйся, не пиши преамбулу.');
   return lines.join('\n');
 }
 
@@ -259,7 +289,7 @@ async function generateOneArtifact(
       }
     }
 
-    const report = validateVoice({ text: textForValidator, voice: spec.voice });
+    const report = await validateLegacy(textForValidator, spec.voice);
     lastReport = report;
     if (report.ok) {
       return { text: lastText, report, attempts: attempt, costUsd: costSum };
@@ -301,6 +331,20 @@ export async function generateContentPackage(
   input: ContentGenInput,
   deps: ContentGenDeps,
 ): Promise<ContentGenResult> {
+  // v3 (2026-06-04): динамические system prompts.
+  // YE — buildTwinYePrompt подгружает voice-analysis JSON + top-5 cosine эталонов.
+  // RZ — buildTwinRzPrompt с глоссарием участницы.
+  const yeBuilt = await buildTwinYePrompt(deps.pool, {
+    ideaText: input.summary,
+    codeWord: input.codeWord ?? null,
+  });
+  const rzBuilt = await buildTwinRzPrompt(deps.pool, {
+    ideaText: input.summary,
+    codeWord: input.codeWord ?? null,
+  });
+  const TWIN_YE_SYSTEM_PROMPT = yeBuilt.systemPrompt;
+  const TWIN_RZ_SYSTEM_PROMPT = rzBuilt.systemPrompt;
+
   const specs: ArtifactSpec[] = [
     { kind: 'reel', voice: 'YE', systemPrompt: TWIN_YE_SYSTEM_PROMPT, maxChars: REEL_MAX_CHARS },
     { kind: 'tg_post', voice: 'YE', systemPrompt: TWIN_YE_SYSTEM_PROMPT, maxChars: TG_POST_MAX_CHARS },

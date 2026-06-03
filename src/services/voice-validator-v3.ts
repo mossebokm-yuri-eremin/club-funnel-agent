@@ -1,0 +1,239 @@
+// voice-validator-v3 — динамический валидатор на основе knowledge/voice-analysis-ye-v3.md.
+//
+// В отличие от старого voice-validator.ts (хардкодные списки), эта версия читает
+// запреты, характерные обороты и реальные истории из JSON-анализа.
+//
+// Используется content-gen после генерации:
+//   - YE-пост → validate('YE', text)
+//   - RZ-пост → validate('RZ', text)
+//   - Carousel-text → validateFacts(text, sourcePost) — факты согласованы с YE-постом
+//
+// Retry-логика (3 попытки) живёт в content-gen-v3.ts, не здесь.
+
+import { getVoiceAnalysis, type VoiceAnalysis } from './voice-analysis-loader.js';
+
+export interface VoiceValidatorReport {
+  ok: boolean;
+  violations: Array<{ kind: 'forbidden' | 'profession' | 'price' | 'curator' | 'invented_fact'; marker: string; correction?: string }>;
+  characteristic_hits: number;
+  missing_characteristics: string[];
+  word_count: number;
+  reason?: string;
+}
+
+const BOL = '(?<![а-яёА-ЯЁ])';
+const EOL = '(?![а-яёА-ЯЁ])';
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalize(text: string): string {
+  return text.toLowerCase().replace(/ё/g, 'е');
+}
+
+function countWords(text: string): number {
+  return (text.trim().match(/[\p{L}\p{N}]+/gu) ?? []).length;
+}
+
+const PRICE_PATTERNS: Array<{ marker: string; regex: RegExp }> = [
+  { marker: '5000 ₽/руб', regex: /\b5\s*000\s*[₽р]/iu },
+  { marker: '5000 руб', regex: /\b5\s*000\s*(?:руб|р\.)/iu },
+  { marker: '5к в контексте цены', regex: /\b5\s*[кk]\b(?=[^.]{0,40}(?:мес|месяц|клуб|реализ|взнос|оплат))/iu },
+  { marker: 'пять тысяч', regex: /\bпять\s+тысяч\b/iu },
+];
+
+// RZ-specific: куратор-голос запрещён.
+const RZ_CURATOR_PATTERNS: Array<{ marker: string; regex: RegExp }> = [
+  { marker: 'я разбирала с …', regex: new RegExp(`${BOL}(?:я|мы)\\s+разбира(?:ла|л|ли|ем)[а-яё]*\\s+(?:с|у)\\s+[А-ЯЁ][а-яё]+`, 'iu') },
+  { marker: 'мы с участницами клуба', regex: new RegExp(`${BOL}мы\\s+с\\s+(?:участниц|девочк|резидентк)[а-яё]+\\s+(?:клуб|реализ)`, 'iu') },
+  { marker: 'многие дизайнеры верят/думают', regex: new RegExp(`${BOL}мног(?:ие|их|ими)\\s+дизайнер[а-яё]+\\s+(?:верят|думают|считают|искренне)`, 'iu') },
+  { marker: 'и вот что я хочу сказать каждой', regex: new RegExp(`${BOL}(?:и\\s+)?вот\\s+что\\s+я\\s+(?:хочу|хотела)\\s+сказать`, 'iu') },
+  { marker: 'я наставница/куратор/веду клуб', regex: new RegExp(`${BOL}я\\s+(?:наставниц|куратор|веду\\s+клуб)`, 'iu') },
+  { marker: 'знаешь что я заметила', regex: new RegExp(`${BOL}знаешь\\s+что\\s+я\\s+заметила`, 'iu') },
+  { marker: 'оказалась/оказалось (в смысле «поняла»)', regex: new RegExp(`${BOL}оказа(?:ло|ла)с(?:ь|я)${EOL}`, 'iu') },
+];
+
+// Проф-ошибки общие для YE и RZ (склонения учтены).
+const PROF_PATTERNS: Array<{ marker: string; regex: RegExp; correction: string }> = [
+  { marker: 'дорогой чек', regex: new RegExp(`${BOL}дорог(?:ой|ого|ому|им|ом|ие|их|ими)\\s+чек[а-яё]*${EOL}`, 'iu'), correction: 'высокий чек / целевой чек' },
+  { marker: 'дешёвый чек', regex: new RegExp(`${BOL}деш[её]в(?:ый|ого|ому|ым|ом|ые|ых|ыми)\\s+чек[а-яё]*${EOL}`, 'iu'), correction: 'низкий чек' },
+  { marker: 'дорогой клиент', regex: new RegExp(`${BOL}дорог(?:ой|ого|ому|им|ом|ие|их|ими)\\s+клиент[а-яё]*${EOL}`, 'iu'), correction: 'платёжеспособный клиент' },
+  { marker: 'дешёвый клиент', regex: new RegExp(`${BOL}деш[её]в(?:ый|ого|ому|ым|ом|ые|ых|ыми)\\s+клиент[а-яё]*${EOL}`, 'iu'), correction: 'клиент эконом-сегмента' },
+  { marker: 'дорогой проект', regex: new RegExp(`${BOL}дорог(?:ой|ого|ому|им|ом|ие|их|ими)\\s+проект[а-яё]*${EOL}`, 'iu'), correction: 'большой / премиум-проект' },
+  { marker: 'оказывать услуги', regex: new RegExp(`${BOL}оказыва[а-яё]+\\s+услуг[а-яё]*${EOL}`, 'iu'), correction: 'делать дизайн / вести проект' },
+  { marker: 'предоставлять услуги', regex: new RegExp(`${BOL}предоставл[а-яё]+\\s+услуг[а-яё]*${EOL}`, 'iu'), correction: 'делать дизайн / работать' },
+  { marker: 'осуществлять', regex: new RegExp(`${BOL}осуществл[а-яё]+${EOL}`, 'iu'), correction: 'делать / запускать' },
+  { marker: 'шоурум', regex: new RegExp(`${BOL}шоурум[а-яё]*${EOL}`, 'iu'), correction: 'переговорка / офис / студия' },
+  { marker: 'целевая аудитория', regex: new RegExp(`${BOL}целев(?:ая|ой|ую|ые|ыми|ых)\\s+аудитори[а-яё]*${EOL}`, 'iu'), correction: 'аудитория / клиенты' },
+  { marker: 'ЦА (сокращение)', regex: /(?<![А-ЯЁа-яё\w])ЦА(?![А-ЯЁа-яё\w])/u, correction: 'аудитория' },
+  { marker: 'дизайн-интерьер (через дефис)', regex: new RegExp(`${BOL}дизайн-интерьер[а-яё]*${EOL}`, 'iu'), correction: 'дизайн интерьера' },
+];
+
+function findFirst(text: string, re: RegExp): boolean {
+  return re.test(text);
+}
+
+export interface ValidateOptions {
+  /** Минимум характерных оборотов на пост ≥150 слов. По умолчанию 2. */
+  minCharacteristics?: number;
+  /** Применять курaтор-валидацию (только для RZ). */
+  voice: 'YE' | 'RZ' | 'carousel';
+  /** Кэшированный voice-analysis. Если не передан — будет загружен из файла. */
+  voiceAnalysis?: VoiceAnalysis;
+}
+
+export async function validateVoiceV3(
+  text: string,
+  opts: ValidateOptions,
+): Promise<VoiceValidatorReport> {
+  const voice = opts.voiceAnalysis ?? (await getVoiceAnalysis(opts.voice === 'RZ' ? 'RZ' : 'YE'));
+  const violations: VoiceValidatorReport['violations'] = [];
+  const wordCount = countWords(text);
+
+  // 1) Forbidden constructions (динамически из voice-analysis JSON)
+  for (const phrase of voice.forbidden_constructions) {
+    const re = new RegExp(escapeRegex(normalize(phrase)), 'iu');
+    if (re.test(normalize(text))) {
+      violations.push({ kind: 'forbidden', marker: phrase });
+    }
+  }
+
+  // 2) Проф-ошибки (склонения)
+  for (const { marker, regex, correction } of PROF_PATTERNS) {
+    if (findFirst(text, regex)) {
+      violations.push({ kind: 'profession', marker, correction });
+    }
+  }
+
+  // 3) Цена клуба (sacred rule #11)
+  for (const { marker, regex } of PRICE_PATTERNS) {
+    if (findFirst(text, regex)) {
+      violations.push({ kind: 'price', marker });
+    }
+  }
+
+  // 4) Курaтор-конструкции для RZ
+  if (opts.voice === 'RZ') {
+    for (const { marker, regex } of RZ_CURATOR_PATTERNS) {
+      if (findFirst(text, regex)) {
+        violations.push({ kind: 'curator', marker });
+      }
+    }
+  }
+
+  // 5) Характерные обороты (характеристика покрытия)
+  const minChar = opts.minCharacteristics ?? 2;
+  let charHits = 0;
+  const missing: string[] = [];
+  for (const cp of voice.characteristic_phrases.slice(0, 20)) {
+    const re = new RegExp(escapeRegex(normalize(cp.phrase)), 'iu');
+    if (re.test(normalize(text))) {
+      charHits++;
+    } else {
+      missing.push(cp.phrase);
+    }
+  }
+
+  const ok =
+    violations.length === 0 &&
+    (wordCount < 100 || charHits >= minChar);
+
+  const report: VoiceValidatorReport = {
+    ok,
+    violations,
+    characteristic_hits: charHits,
+    missing_characteristics: missing.slice(0, 8),
+    word_count: wordCount,
+  };
+  if (!ok) {
+    if (violations.length > 0) {
+      report.reason = `${violations.length} violations: ${violations.slice(0, 3).map((v) => v.marker).join(', ')}`;
+    } else if (charHits < minChar) {
+      report.reason = `only ${charHits}/${minChar} characteristic phrases used (need from: ${voice.characteristic_phrases.slice(0, 5).map((p) => p.phrase).join(' / ')})`;
+    }
+  }
+  return report;
+}
+
+/** Извлекает имена и числа из текста и сверяет с whitelist (yePost + voice_analysis.real_stories). */
+export async function validateFacts(
+  carouselText: string,
+  yePost: string,
+): Promise<{ ok: boolean; inventedNames: string[]; inventedNumbers: string[] }> {
+  const voice = await getVoiceAnalysis('YE');
+  const whitelist = new Set<string>();
+  for (const s of voice.real_stories) {
+    if (s.name) whitelist.add(normalize(s.name));
+    if (s.city) whitelist.add(normalize(s.city));
+  }
+  // Дополнительно — всё что есть в yePost
+  for (const w of normalize(yePost).match(/[а-яё]+/gu) ?? []) {
+    whitelist.add(w);
+  }
+
+  // Извлекаем потенциальные имена. Эвристика:
+  //   - Capitalized + ≥4 буквы
+  //   - НЕ окончание прилагательного/причастия/местоимения
+  //   - НЕ в COMMON_STARTS (см. ниже)
+  // Имя должно быть либо в whitelist (real_stories + yePost), либо отвергается.
+  const nameCandidates = carouselText.match(/[А-ЯЁ][а-яё]{3,}/gu) ?? [];
+  const inventedNames: string[] = [];
+  for (const n of nameCandidates) {
+    // Эвристика: окончания местоимений / причастий / прилагательных — не имена
+    if (/(?:ого|его|ому|ему|ыми|ими|ыми|ыми|ыми|ыми)$/iu.test(n)) continue;
+    if (/(?:ый|ой|ая|ое|ые|их|ыми|ых|ыми|ому|ему|ого|его)$/iu.test(n)) continue;
+    if (/(?:торый|торая|торое|торые|торых|торыми|торому|торой)$/iu.test(n)) continue;
+    if (!whitelist.has(normalize(n))) {
+      // Не блокируем общие слова в начале предложения; ищем только похожие на имя/город
+      // — оставляем только если это не служебная лексика
+      const COMMON_STARTS = new Set([
+        // Служебная лексика и местоимения
+        'Это', 'Так', 'Но', 'И', 'А', 'Если', 'Когда', 'Что', 'Кто', 'Где',
+        'Почему', 'Зачем', 'Как', 'Чтобы', 'Вот', 'Подождите', 'Можно', 'Нельзя',
+        'Только', 'Без', 'После', 'До', 'Перед', 'Над', 'Под', 'За',
+        'Все', 'Всё', 'Каждый', 'Каждая', 'Каждое', 'Любой', 'Любая', 'Несколько',
+        'Они', 'Она', 'Он', 'Оно', 'Я', 'Ты', 'Мы', 'Вы',
+        'Не', 'Да', 'Нет', 'Может', 'Можешь', 'Должен', 'Должна', 'Должно', 'Нужно', 'Надо',
+        'Хочешь', 'Хотите', 'Хочется', 'Знаешь', 'Знаете',
+        'Помнишь', 'Помните', 'Представь', 'Представьте',
+        // Глаголы 1/2/3 лица
+        'Сделал', 'Сделала', 'Сделали', 'Делает', 'Делаешь',
+        'Работает', 'Работаешь', 'Работаю',
+        'Закончил', 'Закончила', 'Начал', 'Начала',
+        'Получил', 'Получила', 'Заплатил', 'Заплатила',
+        'Объясняю', 'Расскажу', 'Покажу',
+        // Существительные про работу/деньги
+        'Человек', 'Люди', 'Дизайн', 'Дизайнер', 'Дизайнеры', 'Архитектор', 'Архитекторы',
+        'Клиент', 'Клиенты', 'Заказчик', 'Заказчики',
+        'Студия', 'Студии', 'Офис', 'Команда', 'Бренд', 'Личный',
+        'Проект', 'Проекты', 'Объект', 'Объекты',
+        'Чертёж', 'Чертежи', 'Чек', 'Цена', 'Стоимость', 'Деньги',
+        'Главное', 'Важное', 'Лучшее', 'Худшее',
+        // Время
+        'Сейчас', 'Тогда', 'Вчера', 'Сегодня', 'Завтра', 'Сначала', 'Потом',
+        // Города/гео часто упоминаемые
+        'Москва', 'Россия', 'Реализация', 'Думаешь', 'Думаете',
+      ]);
+      if (!COMMON_STARTS.has(n)) {
+        inventedNames.push(n);
+      }
+    }
+  }
+
+  // Извлекаем числа > 999 (не дата) — проверяем что они встречаются в yePost
+  const numCandidates = carouselText.match(/\b\d{4,}\b/g) ?? [];
+  const inventedNumbers: string[] = [];
+  const yeNorm = yePost;
+  for (const num of numCandidates) {
+    if (!yeNorm.includes(num)) {
+      inventedNumbers.push(num);
+    }
+  }
+
+  return {
+    ok: inventedNames.length === 0 && inventedNumbers.length === 0,
+    inventedNames,
+    inventedNumbers,
+  };
+}

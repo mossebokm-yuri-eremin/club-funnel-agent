@@ -354,6 +354,49 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                   'approval-callback: funnel-activator failed (non-fatal)',
                 );
               }
+              // Фолбэк: даже если r=null — Юрий должен получить code_word.
+              // Если activate вернул null без ошибки — generate code_word ad-hoc через тот же
+              // generator и сохранить в funnels (status='draft'), чтобы Юрий мог опубликовать.
+              if (!r && !activateErr && ideaIdForLog) {
+                try {
+                  const { generateUniqueCodeWord } = await import(
+                    '../services/code-word-generator.js'
+                  );
+                  const ideaSelect = await opts.pool!.query<{
+                    pain_tag: string | null;
+                  }>(
+                    `SELECT pain_tag FROM ideas WHERE id = $1`,
+                    [ideaIdForLog],
+                  );
+                  const painTag = ideaSelect.rows[0]?.pain_tag ?? '';
+                  const cw = await generateUniqueCodeWord(
+                    opts.pool!,
+                    painTag ? { painSeed: painTag } : {},
+                  );
+                  const ins = await opts.pool!.query<{ id: string }>(
+                    `INSERT INTO funnels (idea_id, code_word, strategy, status)
+                       VALUES ($1, $2, COALESCE((SELECT strategy FROM ideas WHERE id = $1), 'B'), 'draft')
+                       RETURNING id`,
+                    [ideaIdForLog, cw],
+                  );
+                  r = {
+                    funnelId: ins.rows[0]!.id,
+                    codeWord: cw,
+                    chatplaceAutomationId: null,
+                    status: 'draft',
+                  };
+                  log.warn(
+                    { pkgId, funnelId: r.funnelId, codeWord: cw },
+                    'approval-callback: funnel-activator returned null, created DRAFT funnel as fallback',
+                  );
+                } catch (fbErr) {
+                  log.error(
+                    { err: (fbErr as Error).message, pkgId },
+                    'approval-callback: fallback code_word generation failed',
+                  );
+                }
+              }
+
               if (r) {
                 // Генерим IG caption через Sonnet 4.6 + кэшируем в БД.
                 let caption = '(не удалось сгенерировать подпись — попробуй ещё раз позже)';
@@ -397,24 +440,58 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                   );
                 }
 
+                // Собираем URL'ы слайдов из content_packages.assets
+                let slideLinks = '';
+                let slideCount = 0;
+                try {
+                  const pkgAssetsRes = await opts.pool!.query<{
+                    assets: unknown;
+                  }>(`SELECT assets FROM content_packages WHERE id = $1`, [pkgId]);
+                  const assets = pkgAssetsRes.rows[0]?.assets;
+                  if (assets && typeof assets === 'object') {
+                    const a = assets as { slides?: string[] };
+                    if (Array.isArray(a.slides)) {
+                      slideCount = a.slides.length;
+                      slideLinks = a.slides
+                        .map((u, i) => `${i + 1}. ${u}`)
+                        .join('\n');
+                    }
+                  }
+                } catch { /* non-fatal */ }
+
                 const codeUpper = r.codeWord.toUpperCase();
                 const cpLine = r.chatplaceAutomationId
-                  ? '✅ ' + r.chatplaceAutomationId.slice(0, 12)
-                  : '⚠️ pending';
-                const panel =
-                  '📸 КАРУСЕЛЬ ГОТОВА К ПУБЛИКАЦИИ\n\n' +
-                  '✅ Воронка активна (ChatPlace: ' + cpLine + ')\n' +
-                  '🔤 Кодовое слово: ' + codeUpper + '\n\n' +
-                  '📝 Подпись для Instagram:\n' +
+                  ? '✅ ChatPlace: ' + r.chatplaceAutomationId.slice(0, 12)
+                  : (r.status === 'draft'
+                      ? '⚠️ ChatPlace pending — funnel в режиме draft'
+                      : '⚠️ ChatPlace pending');
+                const funnelInfo =
+                  '🎯 *ВОРОНКА АКТИВНА ДЛЯ ПУБЛИКАЦИИ*\n\n' +
+                  cpLine + '\n' +
+                  '🔤 Кодовое слово: `' + codeUpper + '`\n\n' +
+                  '📸 *КАРУСЕЛЬ* (' + slideCount + ' слайдов):\n' +
+                  (slideLinks || '(нет ссылок — assets пустой)') + '\n\n' +
+                  '📝 *ПОДПИСЬ ДЛЯ INSTAGRAM:*\n' +
                   '————————————————————————\n' +
                   caption +
-                  '\n————————————————————————\n\n' +
-                  '📋 Что делать:\n' +
+                  '\n————————————————————————';
+
+                const flow =
+                  '📊 *КАК РАБОТАЕТ ВОРОНКА:*\n' +
+                  '1. Ты публикуешь карусель в IG с этой подписью\n' +
+                  '2. Подписчик пишет `' + codeUpper + '` в Direct\n' +
+                  '3. ChatPlace ловит и шлёт ссылку на TG-бота\n' +
+                  '4. Подписчик жмёт → `/start ' + r.codeWord + '` → попадает в воронку\n' +
+                  '5. Прогрев (T+0/T+2h/T+8h/T+24h)\n' +
+                  '6. Оплата клуба в GC → авто-инвайт в TG-чат клуба\n' +
+                  '7. Тебе уведомление "💰 Оплата прошла"\n\n' +
+                  '📋 *Что делать:*\n' +
                   '1. Открой Instagram → Создать пост\n' +
-                  '2. Загрузи все 10 слайдов карусели\n' +
+                  '2. Загрузи все ' + slideCount + ' слайдов\n' +
                   '3. Скопируй подпись выше и вставь\n' +
                   '4. Опубликуй\n' +
-                  '5. После публикации — пиши:  /published <ссылка на пост>';
+                  '5. После публикации напиши: `/published <url>`';
+
                 const igKb: InlineKeyboard = {
                   inline_keyboard: [
                     [
@@ -427,20 +504,43 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                     ],
                   ],
                 };
+                // Разбиваем на 2 сообщения: funnelInfo может быть длинным из-за caption,
+                // flow — компактный с клавиатурой.
+                const chatTarget = ctx.chat?.id ?? ctx.from!.id;
                 await sendMessageRaw(
                   config.TELEGRAM_BOT_TOKEN,
-                  ctx.chat?.id ?? ctx.from!.id,
-                  panel,
-                  igKb,
+                  chatTarget,
+                  funnelInfo.slice(0, 4000),
+                  undefined,
+                  'Markdown',
                 ).catch((e) => {
                   log.warn(
                     { err: (e as Error).message },
-                    'approval-callback: IG panel send failed (non-fatal)',
+                    'approval-callback: IG panel send failed (1/2, non-fatal)',
+                  );
+                });
+                await sendMessageRaw(
+                  config.TELEGRAM_BOT_TOKEN,
+                  chatTarget,
+                  flow,
+                  igKb,
+                  'Markdown',
+                ).catch((e) => {
+                  log.warn(
+                    { err: (e as Error).message },
+                    'approval-callback: IG panel send failed (2/2, non-fatal)',
                   );
                 });
               } else if (activateErr) {
                 await ctx.reply(
                   '⚠️ Воронка не активирована: ' + activateErr.message.slice(0, 200),
+                ).catch(() => {});
+              } else {
+                // r=null И activateErr=null И fallback не сработал —
+                // дать Юрию минимум информации о проблеме.
+                await ctx.reply(
+                  '⚠️ Воронка не активирована (causes: idea.strategy=null / bonus отсутствует / ChatPlace недоступен). ' +
+                  'Проверь логи и состояние idea в БД.',
                 ).catch(() => {});
               }
             } catch (errOuter) {
@@ -1045,12 +1145,14 @@ async function sendMessageRaw(
   chatId: number,
   text: string,
   replyMarkup?: InlineKeyboard,
+  parseMode?: 'Markdown' | 'HTML',
 ): Promise<void> {
   const body: Record<string, unknown> = {
     chat_id: chatId,
     text,
     disable_web_page_preview: true,
   };
+  if (parseMode) body.parse_mode = parseMode;
   if (replyMarkup) body.reply_markup = replyMarkup;
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',

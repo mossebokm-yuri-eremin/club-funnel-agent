@@ -68,9 +68,12 @@ interface IdeaRow {
 }
 
 interface TemplateSlideRow {
+  id: number;
   slide_number: number;
   public_url: string;
   drive_file_id: string;
+  has_person_face: boolean | null;
+  face_role: string | null;
 }
 
 function parseSlides(value: unknown): string[] {
@@ -126,6 +129,70 @@ function buildEditPrompt(slideText: string, slideIndex: number, totalSlides: num
   ].join('\n');
 }
 
+// Prompt для slide где нужно заменить и ТЕКСТ, и ЛИЦО (Виктория, голос RZ).
+function buildEditPromptWithViktoriaFace(
+  slideText: string,
+  slideIndex: number,
+  totalSlides: number,
+): string {
+  const role =
+    slideIndex === 1
+      ? 'cover'
+      : slideIndex === totalSlides && totalSlides > 1
+        ? 'final CTA'
+        : 'body';
+  return [
+    'TASK: Edit this carousel slide. Two changes:',
+    `  (a) Replace the Russian text with the new text below.`,
+    `  (b) Replace the woman’s face in the FIRST image with the woman shown in the SECOND reference image (Viktoria, interior designer in her late twenties to mid-thirties).`,
+    '',
+    `New Russian text for the ${role} slide:`,
+    `«${slideText}»`,
+    '',
+    'STRICT REQUIREMENTS:',
+    '1. The new face must clearly be the person from the SECOND reference image — preserve identity, hair, complexion. Match the pose, lighting direction, color grading, and composition of the ORIGINAL FIRST image.',
+    '2. Keep the background, photo crop, illustrations, colors, layout, typography style, watermarks, page numbers, brand handles — IDENTICAL to the input first image.',
+    '3. Adjust ONLY the font SIZE of the new text so it fits in the same text area — do not change font family, weight, color, or alignment.',
+    '4. Maintain safe area: keep at least 60px padding from all edges, never crop letters.',
+    '5. If the new text is longer — reduce font size proportionally, wrap onto multiple lines matching the original line-break pattern.',
+    '',
+    'OUTPUT: a single image identical to the first input, with the face swapped to the second reference person AND the text content changed.',
+  ].join('\n');
+}
+
+// Prompt для slide где нужно заменить и ТЕКСТ, и ЛИЦО (Юрий).
+// Второе изображение в imageUrls — портрет Юрия (face reference).
+function buildEditPromptWithYuryFace(
+  slideText: string,
+  slideIndex: number,
+  totalSlides: number,
+): string {
+  const role =
+    slideIndex === 1
+      ? 'cover'
+      : slideIndex === totalSlides && totalSlides > 1
+        ? 'final CTA'
+        : 'body';
+  return [
+    'TASK: Edit this carousel slide. Two changes:',
+    `  (a) Replace the Russian text with the new text below.`,
+    `  (b) Replace the person’s face in the FIRST image with the person shown in the SECOND reference image (Yury Eremin, interior-design mentor, ~45 years old).`,
+    '',
+    `New Russian text for the ${role} slide:`,
+    `«${slideText}»`,
+    '',
+    'STRICT REQUIREMENTS:',
+    '1. The new face must clearly be the person from the SECOND reference image — preserve identity, hair, beard, complexion. Match the pose, lighting direction, color grading, and composition of the ORIGINAL FIRST image.',
+    '2. Keep the background, photo crop, illustrations, colors, layout, typography style, watermarks, page numbers, brand handles — IDENTICAL to the input first image.',
+    '3. Adjust ONLY the font SIZE of the new text so it fits in the same text area — do not change font family, weight, color, or alignment.',
+    '4. Maintain safe area: keep at least 60px padding from all edges, never crop letters.',
+    '5. If the new text is shorter — keep the same font size, do not enlarge to fill.',
+    '6. If the new text is longer — reduce font size proportionally, wrap onto multiple lines matching the original line-break pattern.',
+    '',
+    'OUTPUT: a single image identical to the first input, with the face swapped to the second reference person AND the text content changed.',
+  ].join('\n');
+}
+
 async function renderViaEdit(
   pool: Pool,
   pkg: ContentPackageRow,
@@ -141,12 +208,14 @@ async function renderViaEdit(
   const totalSlides = slidesText.length;
   const voiceLower = voice.toLowerCase();
 
-  // 1. Берём эталонные слайды из БД.
+  // 1. Берём эталонные слайды из БД (+ Vision analysis для face-replacement).
   const tplRes = await pool.query<TemplateSlideRow>(
-    `SELECT slide_number, public_url, drive_file_id
-       FROM carousel_template_slides
-      WHERE voice = $1 AND carousel_name = $2
-      ORDER BY slide_number ASC`,
+    `SELECT s.id, s.slide_number, s.public_url, s.drive_file_id,
+            a.has_person_face, a.face_role
+       FROM carousel_template_slides s
+       LEFT JOIN template_slide_analysis a ON a.template_slide_id = s.id
+      WHERE s.voice = $1 AND s.carousel_name = $2
+      ORDER BY s.slide_number ASC`,
     [voiceLower, templateFolderName],
   );
   const templates = tplRes.rows;
@@ -160,11 +229,13 @@ async function renderViaEdit(
     'carousel-renderer[edit]: templates loaded',
   );
 
-  // 2. Подгружаем editImage + Sharp resize.
-  const [{ editImage, downloadGptunnelImage }, { recordImageGeneration }, sharp] = await Promise.all([
+  // 2. Подгружаем editImage + Sharp resize + photo selectors (face-replacement).
+  const [{ editImage, downloadGptunnelImage }, { recordImageGeneration }, sharp, { selectYuryPhotoUrl }, { selectViktoriaPhotoUrl }] = await Promise.all([
     import('../integrations/gptunnel-creative.js'),
     import('./image-billing.js'),
     import('sharp').then((m) => m.default),
+    import('./yury-photo-selector.js'),
+    import('./viktoria-photo-selector.js'),
   ]);
 
   const editModel = (config.GPTUNNEL_EDIT_MODEL ?? 'nano-banana-2') as
@@ -180,15 +251,68 @@ async function renderViaEdit(
     const isCover = slideIndex === 1;
     const isCta = slideIndex === totalSlides && totalSlides > 1;
     const base = pickBaseSlide(templates, slideIndex, isCover, isCta);
-    const prompt = buildEditPrompt(slideText, slideIndex, totalSlides);
     const slideStarted = Date.now();
+
+    // Face-replacement: если эталон содержит мужское лицо (man-40-50) И voice=YE — заменяем на Юрия.
+    // Если женское — оставляем эталон (нужны фото героинь — отдельная задача).
+    const isYurySlot = voice === 'YE' && base.has_person_face === true && base.face_role === 'man-40-50';
+    const isHeroineSlot = base.has_person_face === true && base.face_role !== null && base.face_role.startsWith('woman');
+
+    let prompt: string;
+    let imageUrls: string[];
+    let faceMode: 'text-only' | 'yury' | 'viktoria' | 'heroine-skipped' | 'multi-skipped';
+    if (isYurySlot) {
+      const yuryPhotoUrl = selectYuryPhotoUrl({
+        slideIndex,
+        totalSlides,
+        slideText,
+        background: null,
+      });
+      prompt = buildEditPromptWithYuryFace(slideText, slideIndex, totalSlides);
+      imageUrls = [base.public_url, yuryPhotoUrl];
+      faceMode = 'yury';
+    } else if (isHeroineSlot && voice === 'RZ') {
+      // RZ-голос — героиня = Виктория (участница клуба). Подменяем на её фото.
+      const viktoriaUrl = selectViktoriaPhotoUrl({
+        slideIndex,
+        totalSlides,
+        slideText,
+        background: null,
+      });
+      prompt = buildEditPromptWithViktoriaFace(slideText, slideIndex, totalSlides);
+      imageUrls = [base.public_url, viktoriaUrl];
+      faceMode = 'viktoria';
+    } else if (isHeroineSlot) {
+      // YE-голос с женским лицом на эталоне — кейс реального ученика (Анна Кацапова, Лена, …).
+      // Фотобанк кейсов пока не настроен → оставляем эталон.
+      prompt = buildEditPrompt(slideText, slideIndex, totalSlides);
+      imageUrls = [base.public_url];
+      faceMode = 'heroine-skipped';
+      log.warn(
+        {
+          contentPackageId: pkg.id,
+          slideIndex,
+          face_role: base.face_role,
+          base_slide_id: base.id,
+        },
+        'carousel-renderer[edit]: YE heroine slot — keeping reference photo (cases-data photos not configured)',
+      );
+    } else if (base.face_role === 'multiple-people') {
+      prompt = buildEditPrompt(slideText, slideIndex, totalSlides);
+      imageUrls = [base.public_url];
+      faceMode = 'multi-skipped';
+    } else {
+      prompt = buildEditPrompt(slideText, slideIndex, totalSlides);
+      imageUrls = [base.public_url];
+      faceMode = 'text-only';
+    }
 
     let edit: Awaited<ReturnType<typeof editImage>>;
     try {
       edit = await editImage({
         model: editModel,
         prompt,
-        imageUrls: [base.public_url],
+        imageUrls,
       });
     } catch (err) {
       await recordImageGeneration(pool, {
@@ -243,6 +367,8 @@ async function renderViaEdit(
         bytes: finalJpg.length,
         costKopecks: edit.costKopecks,
         durationMs: Date.now() - slideStarted,
+        faceMode,
+        imagesCount: imageUrls.length,
       },
       'carousel-renderer[edit]: slide rendered',
     );
