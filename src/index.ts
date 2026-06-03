@@ -20,6 +20,10 @@ import {
   scheduleGetCourseParserCron,
 } from './jobs/getcourse-parser-worker.js';
 import {
+  createGcGroupPollingWorker,
+  scheduleGcGroupPollingCron,
+} from './jobs/gc-group-polling-worker.js';
+import {
   createWarmupSenderWorker,
   scheduleWarmupSenderCron,
 } from './jobs/warmup-sender-worker.js';
@@ -319,6 +323,9 @@ function buildBotWorkers(bot: Bot): Shutdownable[] {
   }
   // GetCourse raw-events parser (всегда включён — недорогой polling каждые 10s).
   workers.push(createGetCourseParserWorker({ pool }));
+  // POLLING fallback к процессу GC 2474615 — каждые 5 мин дёргаем GC PL API
+  // для группы клуба «Реализация» и эмулируем webhook на новых членов группы.
+  workers.push(createGcGroupPollingWorker({ pool }));
   // Warmup sender (cron каждые 5 мин) — отправляет прогревочные сообщения по
   // warmup_messages WHERE status='pending' AND scheduled_at <= NOW().
   workers.push(createWarmupSenderWorker({ pool }));
@@ -398,6 +405,14 @@ async function main(): Promise<void> {
     await scheduleGetCourseParserCron();
   } catch (err) {
     log.warn({ err }, 'gc-parser cron: failed to schedule (continuing)');
+  }
+
+  // Cron: GC group polling (раз в 5 мин) — замена «Периодическая проверка»
+  // на стороне GC процесса 2474615.
+  try {
+    await scheduleGcGroupPollingCron();
+  } catch (err) {
+    log.warn({ err }, 'gc-group-polling cron: failed to schedule (continuing)');
   }
 
   // Cron: warmup sender (каждые 5 мин — AC-28 + AC-30 long chain).
