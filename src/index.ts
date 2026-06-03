@@ -4,6 +4,7 @@ import { log } from './observability/logger.js';
 import { pool, closePool } from './db/client.js';
 import { redis, closeRedis } from './redis.js';
 import { getCourseWebhookPlugin } from './webhooks/getcourse.js';
+import { registerAmbassadorRoutes } from './api/ambassador.js';
 import { bootstrapBot } from './bot/index.js';
 import { closeAllQueues, getCoursePullQueue } from './jobs/queues.js';
 import { createSttWorker } from './jobs/stt-worker.js';
@@ -214,6 +215,9 @@ async function buildHttpServer(): Promise<FastifyInstance> {
     secret: config.GC_WEBHOOK_SECRET,
     pool,
   });
+
+  // Ambassador API — для проекта ye-ambassador-bot (polling /api/ambassador/purchases).
+  await registerAmbassadorRoutes(app, pool);
 
   // Admin: GetCourse debug endpoints. Bearer = TEST_ENDPOINT_TOKEN.
   const requireAdminAuth = (req: { headers: Record<string, unknown> }): boolean => {

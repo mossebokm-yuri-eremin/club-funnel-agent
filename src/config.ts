@@ -65,6 +65,7 @@ const ConfigSchema = z.object({
   GEMINI_HTTPS_PROXY: z.string().optional(),
   /** Bearer-токен для POST /test/image-gen (диагностический endpoint, не для прод). */
   TEST_ENDPOINT_TOKEN: z.string().optional(),
+  AMBASSADOR_API_TOKEN: z.string().optional(),
   GEMINI_VIDEO_MODEL: z.string().default('gemini-2.5-pro'),
   GEMINI_IMAGE_MODEL: z.string().default('gemini-3-pro-image'),
   /** При true генерирует placeholder PNG вместо вызова Gemini API (для smoke/dev, обход геоблока). */
