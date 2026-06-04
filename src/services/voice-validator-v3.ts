@@ -16,7 +16,22 @@ export type ContentKindV3 = 'reel' | 'tg_post' | 'carousel' | 'rz_post' | 'gener
 
 export interface VoiceValidatorReport {
   ok: boolean;
-  violations: Array<{ kind: 'forbidden' | 'profession' | 'price' | 'curator' | 'invented_fact' | 'length' | 'missing_element'; marker: string; correction?: string }>;
+  violations: Array<{
+    kind:
+      | 'forbidden'
+      | 'profession'
+      | 'price'
+      | 'curator'
+      | 'invented_fact'
+      | 'length'
+      | 'missing_element'
+      | 'hallucinated_capital'
+      | 'jarring_metaphor'
+      | 'repeated_ending'
+      | 'weather_hook_overuse';
+    marker: string;
+    correction?: string;
+  }>;
   characteristic_hits: number;
   missing_characteristics: string[];
   word_count: number;
@@ -26,6 +41,17 @@ export interface VoiceValidatorReport {
   cities_found: string[];
   you_addressing: boolean;
   reason?: string;
+}
+
+/**
+ * Контекст из истории content_packages — для проверки 6b (повторяющиеся концовки)
+ * и 6c (погодные хуки). Заполняется content-gen перед вызовом.
+ */
+export interface HistoryContext {
+  /** Concatenated text последних YE-tg_post + reel за 7 дней (для grep'а endings). */
+  last7DaysText?: string;
+  /** Concatenated text последних 3 reels (для grep'а weather hooks). */
+  last3ReelsText?: string;
 }
 
 const BOL = '(?<![а-яёА-ЯЁ])';
@@ -90,7 +116,42 @@ export interface ValidateOptions {
   kind?: ContentKindV3;
   /** Кэшированный voice-analysis. Если не передан — будет загружен из файла. */
   voiceAnalysis?: VoiceAnalysis;
+  /** История недавнего контента (для запретов повторов и weather-hook overuse). */
+  history?: HistoryContext;
 }
+
+// Слова которые ВНУТРИ предложения могут стоять с заглавной только если это:
+// - имя из real_stories
+// - географическое имя (город из real_stories)
+// - служебное слово в начале предложения (после .!?)
+// - аббревиатура (например, MOSSEBO, ЦА — уже отбраковываются отдельно)
+// Всё остальное — потенциальная галлюцинация типа "Матрас" в середине поста.
+const COMMON_RU_TITLES = new Set([
+  'Реализация', 'Москва', 'Россия', 'Сбер', 'Telegram', 'Instagram',
+  'Midjourney', 'Stable', 'Diffusion', 'ArchiCAD', 'Revit', 'Direct',
+  'Юрий', 'Юрия', 'Юрию', 'Юрием',
+]);
+
+// "Внезапные" метафоры — образы из жизни, далёкие от строительной индустрии,
+// которые не имеют контекста в этом посте и звучат как галлюцинация.
+// "Матрас" в посте про авторский надзор — пример.
+const JARRING_NOUNS = ['матрас', 'тротуар', 'паркинг', 'диван', 'газон', 'фонарь', 'тележка'];
+
+// Погодные хуки (6c) — допустимы редко, не в каждом рилсе подряд.
+const WEATHER_HOOK_PATTERNS: Array<{ marker: string; regex: RegExp }> = [
+  { marker: 'минус N за окном', regex: /минус\s+\d{1,2}\s+за\s+окн/iu },
+  { marker: 'дождь', regex: /(?<![а-яёА-ЯЁ])(дождь|дождик|идёт\s+дождь|пош(?:ёл|ел)\s+дождь)/iu },
+  { marker: 'снег', regex: /(?<![а-яёА-ЯЁ])(снег|снегопад|метель|вьюга)(?![а-яёА-ЯЁ])/iu },
+  { marker: 'зима/мороз', regex: /минус\s+\d+\s+градус|мороз|снежн/iu },
+];
+
+// 6b: типичные шаблонные концовки которые повторять не нужно.
+const REPEATABLE_ENDINGS = [
+  'это и есть механика',
+  'это работает',
+  'логика простая',
+  'это и есть',
+];
 
 function countShortSentences(text: string): number {
   // Предложения, разделённые .!? — считаем те где 1-4 слова (короткие удары)
@@ -155,6 +216,81 @@ export async function validateVoiceV3(
     for (const { marker, regex } of RZ_CURATOR_PATTERNS) {
       if (findFirst(text, regex)) {
         violations.push({ kind: 'curator', marker });
+      }
+    }
+  }
+
+  // 4a) Mid-sentence Capitalized слова — потенциальные галлюцинации.
+  // "Матрас", "Тротуар" с большой буквы в середине предложения = модель выдумала.
+  // Whitelist: имена из real_stories + cities + COMMON_RU_TITLES.
+  const allNames = new Set<string>([
+    ...COMMON_RU_TITLES,
+    ...voice.real_stories.map((s) => s.name).filter((x): x is string => Boolean(x)),
+    ...voice.real_stories
+      .map((s) => s.city)
+      .filter((x): x is string => Boolean(x)),
+  ]);
+  // Найти Capitalized слова которые ИДУТ ПОСЛЕ непунктуационного символа в той же строке.
+  // Простой подход: split по предложениям → проверять с 2-го слова.
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  for (const s of sentences) {
+    const words = s.trim().split(/\s+/);
+    // первое слово — естественно с заглавной; со второго проверяем
+    for (let i = 1; i < words.length; i++) {
+      const w = words[i]!.replace(/[.,!?;:«»"'()\-—]/g, '');
+      if (w.length >= 4 && /^[А-ЯЁ][а-яё]+$/u.test(w) && !allNames.has(w)) {
+        // Пропустить причастные / относительные формы (Который, Та, Тот и т.д.)
+        if (/^(?:Который|Которая|Которое|Которые|Которых|Которым|Которой|Какой|Какая|Какое|Какие)$/iu.test(w)) continue;
+        violations.push({
+          kind: 'hallucinated_capital',
+          marker: `«${w}» с заглавной в середине предложения — не из real_stories, выглядит как галлюцинация`,
+        });
+        break; // одного нарушения на предложение хватит
+      }
+    }
+  }
+
+  // 4b) Внезапные метафоры — "Матрас. Вы продаёте матрас?" в контексте дизайна без объяснения.
+  for (const noun of JARRING_NOUNS) {
+    const re = new RegExp(`(?<![а-яёА-ЯЁ])${noun}(?![а-яёА-ЯЁ])`, 'iu');
+    if (re.test(text)) {
+      // Допускаем если есть пояснение (контекст продажи / сравнения уже введён в предыдущем абзаце).
+      // Простая эвристика: если слово встречается только один раз и без сравнительной частицы — флаг.
+      const matches = text.toLowerCase().match(new RegExp(`${noun}`, 'g')) ?? [];
+      if (matches.length === 1) {
+        violations.push({
+          kind: 'jarring_metaphor',
+          marker: `внезапная метафора «${noun}» без развёртывания — используй образы из стройки/дизайна/ремонта`,
+        });
+      }
+    }
+  }
+
+  // 4c) Повтор шаблонной концовки за последние 7 дней (history).
+  if (opts.history?.last7DaysText) {
+    const hist = normalize(opts.history.last7DaysText);
+    for (const ending of REPEATABLE_ENDINGS) {
+      const n = normalize(ending);
+      const inText = normalize(text).includes(n);
+      const inHistory = hist.includes(n);
+      if (inText && inHistory) {
+        violations.push({
+          kind: 'repeated_ending',
+          marker: `концовка «${ending}» уже была в последних 7 днях — используй другую формулировку`,
+        });
+      }
+    }
+  }
+
+  // 4d) Погодный хук в последних 3 рилсах (history).
+  if ((opts.kind === 'reel') && opts.history?.last3ReelsText) {
+    const hist = opts.history.last3ReelsText;
+    for (const { marker, regex } of WEATHER_HOOK_PATTERNS) {
+      if (regex.test(text) && regex.test(hist)) {
+        violations.push({
+          kind: 'weather_hook_overuse',
+          marker: `погодный хук «${marker}» уже использован в последних 3 рилсах — придумай другой заход`,
+        });
       }
     }
   }

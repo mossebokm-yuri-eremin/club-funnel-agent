@@ -50,8 +50,15 @@ export interface VoiceValidatorReport {
   suggestion?: string;
 }
 
-async function validateLegacy(text: string, voice: VoiceCode): Promise<VoiceValidatorReport> {
-  const v3 = await validateVoiceV3(text, { voice });
+async function validateLegacy(
+  text: string,
+  voice: VoiceCode,
+  kind: 'reel' | 'tg_post' | 'carousel' | 'rz_post' | 'generic' = 'generic',
+  history?: { last7DaysText?: string; last3ReelsText?: string },
+): Promise<VoiceValidatorReport> {
+  const opts: Parameters<typeof validateVoiceV3>[1] = { voice, kind };
+  if (history) opts.history = history;
+  const v3 = await validateVoiceV3(text, opts);
   return {
     voice_code: voice,
     ok: v3.ok,
@@ -66,6 +73,37 @@ async function validateLegacy(text: string, voice: VoiceCode): Promise<VoiceVali
     word_count: v3.word_count,
     ...(v3.reason ? { reason: v3.reason } : {}),
   };
+}
+
+/**
+ * Загружает текст последних YE-публикаций для воронки повторов:
+ *   - last7DaysText: все tg_post + reel_caption за последние 7 дней (concat)
+ *   - last3ReelsText: первые ≤2200 символов из последних 3 reel_caption (для weather-hook check)
+ */
+async function loadHistoryContext(pool: Pool): Promise<{ last7DaysText?: string; last3ReelsText?: string }> {
+  try {
+    const week = await pool.query<{ tg_post: string | null; reel_caption: string | null }>(
+      `SELECT tg_post, reel_caption FROM content_packages
+        WHERE voice_code = 'YE' AND created_at > NOW() - INTERVAL '7 days'
+        ORDER BY created_at DESC LIMIT 30`,
+    );
+    const reels = await pool.query<{ reel_caption: string | null }>(
+      `SELECT reel_caption FROM content_packages
+        WHERE voice_code = 'YE' AND reel_caption IS NOT NULL
+        ORDER BY created_at DESC LIMIT 3`,
+    );
+    return {
+      last7DaysText: week.rows
+        .flatMap((r) => [r.tg_post, r.reel_caption].filter((x): x is string => Boolean(x)))
+        .join('\n\n'),
+      last3ReelsText: reels.rows
+        .map((r) => r.reel_caption ?? '')
+        .filter(Boolean)
+        .join('\n\n'),
+    };
+  } catch {
+    return {};
+  }
 }
 
 export interface ContentGenInput {
@@ -228,6 +266,7 @@ async function generateOneArtifact(
   spec: ArtifactSpec,
   input: ContentGenInput,
   deps: ContentGenDeps,
+  history?: { last7DaysText?: string; last3ReelsText?: string },
 ): Promise<{
   text: string;
   report: VoiceValidatorReport;
@@ -256,7 +295,7 @@ async function generateOneArtifact(
       messages: [{ role: 'user', content: userPrompt }],
       traceTag: `content-gen:${spec.kind}`,
       maxTokens: spec.expectJson ? 4000 : 4000,
-      temperature: 0.7,
+      temperature: 0.85,
     });
     costSum += response.costUsd;
     lastText = response.text.trim();
@@ -289,7 +328,14 @@ async function generateOneArtifact(
       }
     }
 
-    const report = await validateLegacy(textForValidator, spec.voice);
+    // Маппим spec.kind в validator kind
+    const validatorKind =
+      spec.kind === 'reel' ? 'reel'
+      : spec.kind === 'tg_post' ? 'tg_post'
+      : spec.kind === 'carousel' ? 'carousel'
+      : spec.kind === 'rz_post' ? 'rz_post'
+      : 'generic';
+    const report = await validateLegacy(textForValidator, spec.voice, validatorKind, history);
     lastReport = report;
     if (report.ok) {
       return { text: lastText, report, attempts: attempt, costUsd: costSum };
@@ -331,32 +377,44 @@ export async function generateContentPackage(
   input: ContentGenInput,
   deps: ContentGenDeps,
 ): Promise<ContentGenResult> {
-  // v3 (2026-06-04): динамические system prompts.
-  // YE — buildTwinYePrompt подгружает voice-analysis JSON + top-5 cosine эталонов.
-  // RZ — buildTwinRzPrompt с глоссарием участницы.
-  const yeBuilt = await buildTwinYePrompt(deps.pool, {
+  // v3 (2026-06-04): динамические system prompts с kind-aware блоками.
+  // YE/reel и YE/tg_post — разные требования к длине и структуре.
+  const yeReelBuilt = await buildTwinYePrompt(deps.pool, {
     ideaText: input.summary,
     codeWord: input.codeWord ?? null,
+    kind: 'reel',
+  });
+  const yePostBuilt = await buildTwinYePrompt(deps.pool, {
+    ideaText: input.summary,
+    codeWord: input.codeWord ?? null,
+    kind: 'tg_post',
+  });
+  const yeCarouselBuilt = await buildTwinYePrompt(deps.pool, {
+    ideaText: input.summary,
+    codeWord: input.codeWord ?? null,
+    kind: 'carousel',
   });
   const rzBuilt = await buildTwinRzPrompt(deps.pool, {
     ideaText: input.summary,
     codeWord: input.codeWord ?? null,
+    kind: 'tg_post', // RZ-вариант — длинный пост (300-600), не рилс
   });
-  const TWIN_YE_SYSTEM_PROMPT = yeBuilt.systemPrompt;
-  const TWIN_RZ_SYSTEM_PROMPT = rzBuilt.systemPrompt;
 
   const specs: ArtifactSpec[] = [
-    { kind: 'reel', voice: 'YE', systemPrompt: TWIN_YE_SYSTEM_PROMPT, maxChars: REEL_MAX_CHARS },
-    { kind: 'tg_post', voice: 'YE', systemPrompt: TWIN_YE_SYSTEM_PROMPT, maxChars: TG_POST_MAX_CHARS },
-    { kind: 'carousel', voice: 'YE', systemPrompt: TWIN_YE_SYSTEM_PROMPT, expectJson: true },
-    { kind: 'rz_post', voice: 'RZ', systemPrompt: TWIN_RZ_SYSTEM_PROMPT, maxChars: TG_POST_MAX_CHARS },
+    { kind: 'reel', voice: 'YE', systemPrompt: yeReelBuilt.systemPrompt, maxChars: REEL_MAX_CHARS },
+    { kind: 'tg_post', voice: 'YE', systemPrompt: yePostBuilt.systemPrompt, maxChars: TG_POST_MAX_CHARS },
+    { kind: 'carousel', voice: 'YE', systemPrompt: yeCarouselBuilt.systemPrompt, expectJson: true },
+    { kind: 'rz_post', voice: 'RZ', systemPrompt: rzBuilt.systemPrompt, maxChars: TG_POST_MAX_CHARS },
   ];
+
+  // 6b/6c: загружаем историю последних 7 дней + 3 reels для проверки повторов / weather hooks.
+  const history = await loadHistoryContext(deps.pool);
 
   // Генерим последовательно, чтобы не упереться в rate-limit. При желании можно
   // распараллелить, но это даёт скачок RPS на Anthropic.
   const results = [] as Array<Awaited<ReturnType<typeof generateOneArtifact>>>;
   for (const spec of specs) {
-    const r = await generateOneArtifact(spec, input, deps);
+    const r = await generateOneArtifact(spec, input, deps, history);
     results.push(r);
   }
   const [reelR, postR, carouselR, rzR] = results;
