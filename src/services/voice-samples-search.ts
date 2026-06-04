@@ -43,12 +43,12 @@ export async function getTopVoiceSamples(
   } catch (err) {
     log.warn(
       { err: (err as Error).message.slice(0, 200) },
-      'voice-samples-search: embeddings failed, fallback to first K by id',
+      'voice-samples-search: embeddings failed, fallback to top-K by length (longest = более развёрнутый эталон)',
     );
     const r = await pool.query<VoiceSample>(
       `SELECT id, source_file, full_text, length_chars, 0::float AS similarity
          FROM yury_voice_samples
-         ORDER BY id ASC
+         ORDER BY length_chars DESC
          LIMIT $1`,
       [k],
     );

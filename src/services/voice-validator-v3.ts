@@ -12,12 +12,19 @@
 
 import { getVoiceAnalysis, type VoiceAnalysis } from './voice-analysis-loader.js';
 
+export type ContentKindV3 = 'reel' | 'tg_post' | 'carousel' | 'rz_post' | 'generic';
+
 export interface VoiceValidatorReport {
   ok: boolean;
-  violations: Array<{ kind: 'forbidden' | 'profession' | 'price' | 'curator' | 'invented_fact'; marker: string; correction?: string }>;
+  violations: Array<{ kind: 'forbidden' | 'profession' | 'price' | 'curator' | 'invented_fact' | 'length' | 'missing_element'; marker: string; correction?: string }>;
   characteristic_hits: number;
   missing_characteristics: string[];
   word_count: number;
+  short_sentences: number;
+  digits_count: number;
+  names_found: string[];
+  cities_found: string[];
+  you_addressing: boolean;
   reason?: string;
 }
 
@@ -79,8 +86,38 @@ export interface ValidateOptions {
   minCharacteristics?: number;
   /** Применять курaтор-валидацию (только для RZ). */
   voice: 'YE' | 'RZ' | 'carousel';
+  /** Тип артефакта — определяет проверки длины и обязательных элементов. */
+  kind?: ContentKindV3;
   /** Кэшированный voice-analysis. Если не передан — будет загружен из файла. */
   voiceAnalysis?: VoiceAnalysis;
+}
+
+function countShortSentences(text: string): number {
+  // Предложения, разделённые .!? — считаем те где 1-4 слова (короткие удары)
+  const sentences = text.split(/[.!?]+/).map((s) => s.trim()).filter((s) => s.length > 0);
+  return sentences.filter((s) => {
+    const w = (s.match(/[\p{L}\p{N}]+/gu) ?? []).length;
+    return w >= 1 && w <= 4;
+  }).length;
+}
+
+function countDigits(text: string): number {
+  return (text.match(/\d/g) ?? []).length;
+}
+
+function hasYouAddressing(text: string): boolean {
+  // Юрий часто переходит на «ты»: «А ты», «у тебя», «ты сам», «ты понимаешь»
+  return /(?<![А-ЯЁа-яё\w])(?:ты|тебя|тебе|тобой|тебе|твой|твоя|твоё|твои)(?![А-ЯЁа-яё\w])/iu.test(text);
+}
+
+function findNamesFromWhitelist(text: string, whitelist: string[]): string[] {
+  const found = new Set<string>();
+  for (const name of whitelist) {
+    if (!name) continue;
+    const re = new RegExp(`(?<![А-ЯЁа-яё\\w])${escapeRegex(name)}(?![А-ЯЁа-яё\\w])`, 'iu');
+    if (re.test(text)) found.add(name);
+  }
+  return Array.from(found);
 }
 
 export async function validateVoiceV3(
@@ -122,8 +159,9 @@ export async function validateVoiceV3(
     }
   }
 
-  // 5) Характерные обороты (характеристика покрытия)
-  const minChar = opts.minCharacteristics ?? 2;
+  // 5) Характерные обороты
+  const kind = opts.kind ?? 'generic';
+  const requireMinChar = (kind === 'reel' || kind === 'tg_post') ? 3 : (opts.minCharacteristics ?? 2);
   let charHits = 0;
   const missing: string[] = [];
   for (const cp of voice.characteristic_phrases.slice(0, 20)) {
@@ -135,9 +173,56 @@ export async function validateVoiceV3(
     }
   }
 
+  // 6) Длина и обязательные элементы (только для reel / tg_post)
+  const shortSentences = countShortSentences(text);
+  const digitsCount = countDigits(text);
+  const yourAddressing = hasYouAddressing(text);
+  const realNamesWhitelist = voice.real_stories
+    .map((s) => s.name)
+    .filter((n): n is string => Boolean(n));
+  const cityWhitelist = voice.real_stories
+    .map((s) => s.city)
+    .filter((c): c is string => Boolean(c));
+  const namesFound = findNamesFromWhitelist(text, realNamesWhitelist);
+  const citiesFound = findNamesFromWhitelist(text, cityWhitelist);
+
+  if (kind === 'reel') {
+    if (wordCount < 200) {
+      violations.push({ kind: 'length', marker: `reel слишком короткий (${wordCount} слов, нужно 200-400)` });
+    }
+    if (wordCount > 450) {
+      violations.push({ kind: 'length', marker: `reel слишком длинный (${wordCount} слов, нужно 200-400)` });
+    }
+    if (shortSentences < 5) {
+      violations.push({ kind: 'missing_element', marker: `мало коротких предложений 1-4 слова (${shortSentences}, нужно ≥5)` });
+    }
+    if (digitsCount < 2) {
+      violations.push({ kind: 'missing_element', marker: `мало цифр в тексте (${digitsCount}, нужно ≥2 конкретных цифры)` });
+    }
+    if (!yourAddressing) {
+      violations.push({ kind: 'missing_element', marker: 'нет перехода на «ты» (А ты / у тебя / ты сам)' });
+    }
+  } else if (kind === 'tg_post') {
+    if (wordCount < 300) {
+      violations.push({ kind: 'length', marker: `tg_post слишком короткий (${wordCount} слов, нужно 300-600)` });
+    }
+    if (wordCount > 700) {
+      violations.push({ kind: 'length', marker: `tg_post слишком длинный (${wordCount} слов, нужно 300-600)` });
+    }
+    if (shortSentences < 6) {
+      violations.push({ kind: 'missing_element', marker: `мало коротких предложений (${shortSentences}, нужно ≥6)` });
+    }
+    if (digitsCount < 3) {
+      violations.push({ kind: 'missing_element', marker: `мало цифр (${digitsCount}, нужно ≥3)` });
+    }
+    if (!yourAddressing) {
+      violations.push({ kind: 'missing_element', marker: 'нет перехода на «ты»' });
+    }
+  }
+
   const ok =
     violations.length === 0 &&
-    (wordCount < 100 || charHits >= minChar);
+    (wordCount < 100 || charHits >= requireMinChar);
 
   const report: VoiceValidatorReport = {
     ok,
@@ -145,12 +230,17 @@ export async function validateVoiceV3(
     characteristic_hits: charHits,
     missing_characteristics: missing.slice(0, 8),
     word_count: wordCount,
+    short_sentences: shortSentences,
+    digits_count: digitsCount,
+    names_found: namesFound,
+    cities_found: citiesFound,
+    you_addressing: yourAddressing,
   };
   if (!ok) {
     if (violations.length > 0) {
-      report.reason = `${violations.length} violations: ${violations.slice(0, 3).map((v) => v.marker).join(', ')}`;
-    } else if (charHits < minChar) {
-      report.reason = `only ${charHits}/${minChar} characteristic phrases used (need from: ${voice.characteristic_phrases.slice(0, 5).map((p) => p.phrase).join(' / ')})`;
+      report.reason = `${violations.length} violations: ${violations.slice(0, 3).map((v) => v.marker).join(' | ')}`;
+    } else if (charHits < requireMinChar) {
+      report.reason = `only ${charHits}/${requireMinChar} characteristic phrases used (need from: ${voice.characteristic_phrases.slice(0, 5).map((p) => p.phrase).join(' / ')})`;
     }
   }
   return report;
