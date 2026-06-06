@@ -465,6 +465,19 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                   }
                 } catch { /* non-fatal */ }
 
+                // Генерим markdown-ТЗ карусели для дизайнера / Claude Design.
+                let briefUrl: string | null = null;
+                try {
+                  const { writeCarouselBrief } = await import('../services/carousel-brief.js');
+                  const brief = await writeCarouselBrief(opts.pool!, { contentPackageId: pkgId });
+                  if (brief.status === 'ok' && brief.url) briefUrl = brief.url;
+                } catch (err) {
+                  log.warn(
+                    { err: (err as Error).message, pkgId },
+                    'approval-callback: carousel-brief write failed (non-fatal)',
+                  );
+                }
+
                 const codeUpper = r.codeWord.toUpperCase();
                 const cpLine = r.chatplaceAutomationId
                   ? '✅ ChatPlace: ' + r.chatplaceAutomationId.slice(0, 12)
@@ -481,6 +494,11 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                   '————————————————————————\n' +
                   caption +
                   '\n————————————————————————';
+
+                const briefLine = briefUrl
+                  ? '\n\n📐 *ТЗ КАРУСЕЛИ ДЛЯ ДИЗАЙНЕРА / Claude Design:*\n' + briefUrl
+                  : '';
+                const funnelInfoWithBrief = funnelInfo + briefLine;
 
                 const flow =
                   '📊 *КАК РАБОТАЕТ ВОРОНКА:*\n' +
@@ -505,7 +523,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                       { text: '📋 Подпись',       callback_data: 'ig:caption:' + pkgId },
                     ],
                     [
-                      { text: '📥 Скачать ZIP',   callback_data: 'ig:zip:' + pkgId },
+                      { text: '📐 Скачать ТЗ',  callback_data: 'ig:brief:' + pkgId },
                       { text: '✅ Опубликовал',   callback_data: 'ig:published:' + pkgId },
                     ],
                   ],
@@ -516,7 +534,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                 await sendMessageRaw(
                   config.TELEGRAM_BOT_TOKEN,
                   chatTarget,
-                  funnelInfo.slice(0, 4000),
+                  funnelInfoWithBrief.slice(0, 4000),
                   undefined,
                   'Markdown',
                 ).catch((e) => {
@@ -633,7 +651,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- callback_query: IG publish helpers (Phase 13) ----
   // ig:code:<funnelId>     — выдаёт code_word отдельным сообщением (для удобного копирования)
   // ig:caption:<pkgId>     — выдаёт сохранённый IG caption отдельным сообщением
-  bot.callbackQuery(/^ig:(code|caption|zip|published):([0-9a-fA-F-]{36})$/, async (ctx) => {
+  bot.callbackQuery(/^ig:(code|caption|zip|brief|published):([0-9a-fA-F-]{36})$/, async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserIds)) {
       await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
       return;
@@ -642,7 +660,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
       await ctx.answerCallbackQuery({ text: 'pool not wired' });
       return;
     }
-    const kind = ctx.match![1] as 'code' | 'caption';
+    const kind = ctx.match![1] as 'code' | 'caption' | 'zip' | 'brief' | 'published';
     const id = ctx.match![2] as string;
     try {
       if (kind === 'code') {
@@ -702,6 +720,24 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
           log.error({ err: (err as Error).message, pkgId: id }, 'ig:zip failed');
           await ctx.reply('Не удалось собрать ZIP: ' + (err as Error).message.slice(0, 200)).catch(() => {});
           await ctx.answerCallbackQuery({ text: 'ошибка ZIP' });
+        }
+      } else if (kind === 'brief') {
+        try {
+          const { writeCarouselBrief } = await import('../services/carousel-brief.js');
+          const brief = await writeCarouselBrief(opts.pool!, { contentPackageId: id });
+          if (brief.status !== 'ok' || !brief.url) {
+            await ctx.answerCallbackQuery({ text: 'ТЗ не сгенерировано' });
+            return;
+          }
+          await ctx.reply(
+            '📐 ТЗ карусели (markdown для дизайнера / Claude Design):\n' + brief.url +
+            '\n\nКопируй ссылку, открывай в браузере или передавай дизайнеру / в Claude Design.',
+          ).catch(() => {});
+          await ctx.answerCallbackQuery({ text: '📐 ТЗ готово' });
+        } catch (err) {
+          log.error({ err: (err as Error).message, pkgId: id }, 'ig:brief failed');
+          await ctx.reply('Не удалось сгенерировать ТЗ: ' + (err as Error).message.slice(0, 200)).catch(() => {});
+          await ctx.answerCallbackQuery({ text: 'ошибка ТЗ' });
         }
       } else if (kind === 'published') {
         await ctx.reply(
