@@ -22,7 +22,11 @@ import {
 } from '../jobs/queues.js';
 
 export interface RegisterHandlersOptions {
-  allowedUserId: number;
+  /**
+   * Список Telegram user_id, которым разрешено писать боту.
+   * Первый элемент — основной (YE_TG_USER_ID), остальные — мобильный/тестеры (YE_TG_USER_IDS CSV).
+   */
+  allowedUserIds: number[];
   /** Для статусной команды — функция, возвращающая текущие счётчики. */
   statusProvider?: () => Promise<BotStatus> | BotStatus;
   /** Для callback-handlers одобрения content_package. Если не задан — кнопки не реагируют. */
@@ -47,8 +51,10 @@ const HELP =
   '— /refresh_templates — перечитать SVG-шаблоны каруселей из GDrive;\n' +
   '— /style short|normal|detailed — длина контента.';
 
-function isAuthorized(ctx: Context, allowedUserId: number): boolean {
-  return ctx.from?.id === allowedUserId;
+function isAuthorized(ctx: Context, allowedUserIds: number[]): boolean {
+  const from = ctx.from?.id;
+  if (typeof from !== "number") return false;
+  return allowedUserIds.includes(from);
 }
 
 export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void {
@@ -64,7 +70,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
 
     // Сценарий 1: сам Юрий или admin без payload
     if (!payload) {
-      if (isAuthorized(ctx, opts.allowedUserId)) {
+      if (isAuthorized(ctx, opts.allowedUserIds)) {
         await ctx.reply(GREETING);
         return;
       }
@@ -157,7 +163,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
 
   // ---- /help ----
   bot.command('help', async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized sender: /help');
       return;
     }
@@ -167,7 +173,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- /refresh_kb ----
   // Пересчитывает эмбеддинги knowledge_embeddings после обновления MD-файлов в knowledge/.
   bot.command('refresh_kb', async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized: /refresh_kb');
       return;
     }
@@ -199,7 +205,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // карусель перечитает шаблоны из GDrive (GDRIVE_CAROUSEL_TEMPLATES_FOLDER_ID).
   // Нужно после ручной правки шаблонов в GDrive без ожидания TTL.
   bot.command('refresh_templates', async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized: /refresh_templates');
       return;
     }
@@ -221,7 +227,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- /style ----
   // /style short | normal | detailed — переключает длину контента (user_preferences).
   bot.command('style', async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized: /style');
       return;
     }
@@ -263,7 +269,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
 
   // ---- /status ----
   bot.command('status', async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized sender: /status');
       return;
     }
@@ -287,7 +293,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- callback_query: одобрение / regen / edit / reject content_package ----
   // Кнопки в approval-notifier: cp:approve|regen|edit|reject:<UUID>
   bot.callbackQuery(/^cp:(approve|regen|edit|reject):([0-9a-f-]{36})$/, async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized callback');
       await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
       return;
@@ -628,7 +634,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ig:code:<funnelId>     — выдаёт code_word отдельным сообщением (для удобного копирования)
   // ig:caption:<pkgId>     — выдаёт сохранённый IG caption отдельным сообщением
   bot.callbackQuery(/^ig:(code|caption|zip|published):([0-9a-fA-F-]{36})$/, async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
       return;
     }
@@ -711,7 +717,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
 
   // ---- /published <url> — журналируем факт публикации в IG ----
   bot.command('published', async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized: /published');
       return;
     }
@@ -790,7 +796,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   bot.callbackQuery(
     /^lr:(outline_approve|outline_regen|outline_cancel|draft_approve|draft_regen|draft_edit|draft_reject):([0-9a-f-]{36})$/,
     async (ctx) => {
-      if (!isAuthorized(ctx, opts.allowedUserId) || !opts.pool) {
+      if (!isAuthorized(ctx, opts.allowedUserIds) || !opts.pool) {
         await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
         return;
       }
@@ -944,7 +950,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
 
   // ---- voice / audio ----
   bot.on(['message:voice', 'message:audio'], async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized sender: voice/audio');
       return;
     }
@@ -978,7 +984,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
 
   // ---- text / reference forward ----
   bot.on('message', async (ctx) => {
-    if (!isAuthorized(ctx, opts.allowedUserId)) {
+    if (!isAuthorized(ctx, opts.allowedUserIds)) {
       log.warn({ from: ctx.from?.id }, 'unauthorized sender: message');
       return;
     }

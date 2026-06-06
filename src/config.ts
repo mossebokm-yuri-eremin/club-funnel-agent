@@ -143,6 +143,8 @@ const ConfigSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(1, 'TELEGRAM_BOT_TOKEN required'),
   TELEGRAM_BOT_USERNAME: z.string().optional(),
   YE_TG_USER_ID: intNum,
+  /** CSV-список доп. telegram user_id (мобильный/планшет/тестеры). */
+  YE_TG_USER_IDS: z.string().optional(),
   ANNA_TG_CHAT_ID: intNum.optional(),
   TG_WEBHOOK_SECRET: z.string().optional(),
 
