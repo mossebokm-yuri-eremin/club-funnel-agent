@@ -1216,22 +1216,45 @@ async function sendMessageRaw(
   replyMarkup?: InlineKeyboard,
   parseMode?: 'Markdown' | 'HTML',
 ): Promise<void> {
-  const body: Record<string, unknown> = {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: true,
-  };
-  if (parseMode) body.parse_mode = parseMode;
-  if (replyMarkup) body.reply_markup = replyMarkup;
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    log.warn({ status: res.status, body: t.slice(0, 200) }, 'sendMessageRaw failed');
+  // Внутренняя попытка с заданным parseMode
+  async function attempt(pMode: 'Markdown' | 'HTML' | undefined): Promise<{ ok: boolean; status: number; body: string }> {
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true,
+    };
+    if (pMode) body.parse_mode = pMode;
+    if (replyMarkup) body.reply_markup = replyMarkup;
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const respBody = res.ok ? '' : await res.text().catch(() => '');
+    return { ok: res.ok, status: res.status, body: respBody };
   }
+
+  // 1) Первая попытка с parseMode
+  let r = await attempt(parseMode);
+  if (r.ok) return;
+
+  // 2) Telegram 400 «can't parse entities» → retry без parseMode (plain text fallback)
+  const isParseError = parseMode && r.status === 400 && /can.?t parse entities/i.test(r.body);
+  if (isParseError) {
+    log.warn(
+      { status: r.status, parseMode, hint: 'fallback to plain text' },
+      'sendMessageRaw: Markdown failed, retrying without parse_mode',
+    );
+    r = await attempt(undefined);
+    if (r.ok) return;
+  }
+
+  // 3) Финальный fail — log.error И throw (чтобы calling .catch() сработал)
+  log.error(
+    { status: r.status, body: r.body.slice(0, 300), textLen: text.length },
+    'sendMessageRaw: final failure',
+  );
+  throw new Error(`Telegram sendMessage HTTP ${r.status}: ${r.body.slice(0, 200)}`);
 }
 
 // ---- helpers ----
