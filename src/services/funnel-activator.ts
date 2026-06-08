@@ -121,12 +121,24 @@ export async function activateFunnelOnApprove(
     }
   }
 
-  // 3. code_word.
-  const codeWord = await generateUniqueCodeWord(pool, {
-    ...(idea.pain_tag ? { painSeed: idea.pain_tag } : {}),
-    ...(idea.summary ? { ideaSummary: idea.summary } : {}),
-  });
-  log.info({ ideaId: input.ideaId, codeWord, strategy: idea.strategy }, 'funnel-activator: code_word');
+  // 3. code_word — берём pre_code_word из content_packages.assets (создан в content-gen)
+  // ИЛИ генерим новый если pre_code_word нет (для backward-compat).
+  let codeWord: string;
+  const preCodeRes = await pool.query<{ pre_code_word: string | null }>(
+    `SELECT assets->>'pre_code_word' AS pre_code_word FROM content_packages WHERE id = $1`,
+    [input.contentPackageId],
+  );
+  const preCode = preCodeRes.rows[0]?.pre_code_word;
+  if (preCode && typeof preCode === 'string' && preCode.length >= 4) {
+    codeWord = preCode;
+    log.info({ ideaId: input.ideaId, codeWord, source: 'pre_code_word' }, 'funnel-activator: code_word reused');
+  } else {
+    codeWord = await generateUniqueCodeWord(pool, {
+      ...(idea.pain_tag ? { painSeed: idea.pain_tag } : {}),
+      ...(idea.summary ? { ideaSummary: idea.summary } : {}),
+    });
+    log.info({ ideaId: input.ideaId, codeWord, strategy: idea.strategy, source: 'fresh' }, 'funnel-activator: code_word');
+  }
 
   // 4. INSERT funnels.
   const funnelIns = await pool.query<{ id: string }>(

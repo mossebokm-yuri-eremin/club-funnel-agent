@@ -485,6 +485,38 @@ export async function generateContentPackage(
     'content-gen: package saved',
   );
 
+  // ТЗ 2026-06-08: сохраняем pre_code_word в assets чтобы funnel-activator
+  // на approve взял именно этот code_word (а не генерил новый).
+  if (input.codeWord) {
+    try {
+      await deps.pool.query(
+        `UPDATE content_packages SET assets = COALESCE(assets, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+        [contentPackageId, JSON.stringify({ pre_code_word: input.codeWord })],
+      );
+    } catch (err) {
+      log.warn(
+        { err: (err as Error).message, contentPackageId },
+        'content-gen: pre_code_word write failed (non-fatal)',
+      );
+    }
+  }
+
+  // ТЗ 2026-06-08: сохраняем pre_code_word в assets чтобы funnel-activator
+  // на approve взял именно этот code_word (а не генерил новый).
+  if (input.codeWord) {
+    try {
+      await deps.pool.query(
+        `UPDATE content_packages SET assets = COALESCE(assets, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+        [contentPackageId, JSON.stringify({ pre_code_word: input.codeWord })],
+      );
+    } catch (err) {
+      log.warn(
+        { err: (err as Error).message, contentPackageId },
+        'content-gen: pre_code_word write failed (non-fatal)',
+      );
+    }
+  }
+
   return {
     contentPackageId,
     pkg: {

@@ -33,10 +33,10 @@ export interface ContentWorkerResult {
   reason?: string;
 }
 
-const DEFAULT_CODE_WORD = (ideaId: string): string => {
-  const short = ideaId.replace(/[^a-z0-9]/gi, '').slice(0, 6).toLowerCase();
-  return `realiz_${short}`;
-};
+// ТЗ Юрия 2026-06-08: code_word теперь генерится ПЕРЕД content-gen через LLM,
+// чтобы CTA с ним был встроен в сам рилс/tg_post/слайды (а не только в caption).
+// Используется generateUniqueCodeWord из services/code-word-generator (Sonnet 4.6).
+
 
 export function createContentWorker(
   deps: ContentWorkerDeps,
@@ -144,7 +144,17 @@ async function process(
     return { status: 'skipped', ideaId: idea_id, reason: 'summary/pain_tag not set' };
   }
 
-  const codeWord = (deps.makeCodeWord ?? DEFAULT_CODE_WORD)(idea.id);
+  // Pre-generate code_word через LLM (ТЗ 2026-06-08): нужен внутри content-gen
+  // чтобы Sonnet встроил CTA с code_word в текст рилса/tg_post/слайдов.
+  // При approve funnel-activator возьмёт этот же code_word из content_packages.assets.pre_code_word.
+  const { generateUniqueCodeWord } = await import('../services/code-word-generator.js');
+  const codeWord = deps.makeCodeWord
+    ? deps.makeCodeWord(idea.id)
+    : await generateUniqueCodeWord(deps.pool, {
+        ...(idea.pain_tag ? { painSeed: idea.pain_tag } : {}),
+        ...(idea.summary ? { ideaSummary: idea.summary } : {}),
+      });
+  log.info({ ideaId: idea.id, codeWord }, 'content-worker: code_word pre-generated');
   const embedding = deps.embedIdea ? await deps.embedIdea(idea.summary) : null;
   const candidates = await fetchTopCandidates(deps.pool, embedding);
   const ideasSinceLastB = await countIdeasSinceLastB(deps.pool);

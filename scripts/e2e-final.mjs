@@ -73,15 +73,24 @@ async function main() {
   meta.ideaId = ideaId;
   log('   idea_id =', ideaId);
 
-  log('2. Импортируем generateContentPackage из dist/...');
+  log('2. Импортируем generateContentPackage + code-word-generator...');
   const { generateContentPackage } = await import('/opt/club-funnel/dist/src/services/content-gen.js');
+  const { generateUniqueCodeWord } = await import('/opt/club-funnel/dist/src/services/code-word-generator.js');
+
+  log('2b. Pre-generate code_word (ТЗ 2026-06-08: должен быть встроен в тексты)...');
+  const codeWord = await generateUniqueCodeWord(pool, {
+    painSeed: IDEA.pain_tag,
+    ideaSummary: IDEA.summary,
+  });
+  meta.codeWord = codeWord;
+  log('   code_word =', codeWord.toUpperCase());
 
   log('3. Запускаем content-gen pipeline (Sonnet 4.6, temperature 0.85)...');
   const tStart = Date.now();
   let pkg;
   try {
     pkg = await generateContentPackage(
-      { ideaId, strategy: 'B' },
+      { ideaId, strategy: 'B', codeWord },
       { pool, callLlm: undefined },
     );
   } catch (err) {
