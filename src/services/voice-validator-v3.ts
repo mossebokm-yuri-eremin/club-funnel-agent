@@ -12,7 +12,7 @@
 
 import { getVoiceAnalysis, type VoiceAnalysis } from './voice-analysis-loader.js';
 
-export type ContentKindV3 = 'reel' | 'tg_post' | 'carousel' | 'rz_post' | 'generic';
+export type ContentKindV3 = 'reel' | 'tg_post' | 'carousel' | 'ig_caption' | 'rz_post' | 'generic';
 
 export interface VoiceValidatorReport {
   ok: boolean;
@@ -130,6 +130,28 @@ const COMMON_RU_TITLES = new Set([
   'Реализация', 'Москва', 'Россия', 'Сбер', 'Telegram', 'Instagram',
   'Midjourney', 'Stable', 'Diffusion', 'ArchiCAD', 'Revit', 'Direct',
   'Юрий', 'Юрия', 'Юрию', 'Юрием',
+  // Имена и фамилии real_stories (ТЗ Юрия 2026-06-08):
+  'Анна', 'Анны', 'Анну', 'Анне', 'Анной',
+  'Кацапова', 'Кацаповой', 'Кацапову',
+  'Наталья', 'Натальи', 'Наталье', 'Натальей',
+  'Собур',
+  'Ануш', 'Ануши', 'Ануше',
+  'Чернышова', 'Чернышовой',
+  'Ольга', 'Ольги', 'Ольге', 'Ольгой',
+  'Анастасия', 'Анастасии', 'Анастасией',
+  'Татьяна', 'Татьяны', 'Татьяне', 'Татьяной',
+  'Диденко',
+  'Мария', 'Марии', 'Марией',
+  'Виктория', 'Виктории', 'Викторией',
+  // Города из real_stories:
+  'Нижневартовск', 'Нижневартовске', 'Нижневартовску', 'Нижневартовска',
+  'Екатеринбург', 'Екатеринбурга', 'Екатеринбурге',
+  'Алдан', 'Алдана', 'Алдане',
+  'Самара', 'Самары', 'Самаре',
+  'Хабаровск', 'Хабаровска', 'Хабаровске',
+  // Контекст-слова (часто Capitalized в начале фразы):
+  'Эксперт', 'Эксперта', 'Эксперту', 'Экспертом',
+  'Клуб', 'Клуба', 'Клубе', 'Клубом',
 ]);
 
 // "Внезапные" метафоры — образы из жизни, далёкие от строительной индустрии,
@@ -297,7 +319,7 @@ export async function validateVoiceV3(
 
   // 5) Характерные обороты
   const kind = opts.kind ?? 'generic';
-  const requireMinChar = (kind === 'reel' || kind === 'tg_post') ? 3 : (opts.minCharacteristics ?? 2);
+  const requireMinChar = (kind === 'reel') ? 4 : (kind === 'tg_post' || kind === 'ig_caption') ? 3 : (opts.minCharacteristics ?? 2);
   let charHits = 0;
   const missing: string[] = [];
   for (const cp of voice.characteristic_phrases.slice(0, 20)) {
@@ -323,11 +345,11 @@ export async function validateVoiceV3(
   const citiesFound = findNamesFromWhitelist(text, cityWhitelist);
 
   if (kind === 'reel') {
-    if (wordCount < 200) {
-      violations.push({ kind: 'length', marker: `reel слишком короткий (${wordCount} слов, нужно 200-400)` });
+    if (wordCount < 220) {
+      violations.push({ kind: 'length', marker: `reel слишком короткий (${wordCount} слов, нужно 220-450)` });
     }
     if (wordCount > 450) {
-      violations.push({ kind: 'length', marker: `reel слишком длинный (${wordCount} слов, нужно 200-400)` });
+      violations.push({ kind: 'length', marker: `reel слишком длинный (${wordCount} слов, нужно 220-450)` });
     }
     if (shortSentences < 5) {
       violations.push({ kind: 'missing_element', marker: `мало коротких предложений 1-4 слова (${shortSentences}, нужно ≥5)` });
@@ -339,11 +361,11 @@ export async function validateVoiceV3(
       violations.push({ kind: 'missing_element', marker: 'нет перехода на «ты» (А ты / у тебя / ты сам)' });
     }
   } else if (kind === 'tg_post') {
-    if (wordCount < 300) {
-      violations.push({ kind: 'length', marker: `tg_post слишком короткий (${wordCount} слов, нужно 300-600)` });
+    if (wordCount < 280) {
+      violations.push({ kind: 'length', marker: `tg_post слишком короткий (${wordCount} слов, нужно 280-700)` });
     }
     if (wordCount > 700) {
-      violations.push({ kind: 'length', marker: `tg_post слишком длинный (${wordCount} слов, нужно 300-600)` });
+      violations.push({ kind: 'length', marker: `tg_post слишком длинный (${wordCount} слов, нужно 280-700)` });
     }
     if (shortSentences < 6) {
       violations.push({ kind: 'missing_element', marker: `мало коротких предложений (${shortSentences}, нужно ≥6)` });
@@ -353,6 +375,33 @@ export async function validateVoiceV3(
     }
     if (!yourAddressing) {
       violations.push({ kind: 'missing_element', marker: 'нет перехода на «ты»' });
+    }
+  } else if (kind === 'ig_caption') {
+    if (wordCount < 200) {
+      violations.push({ kind: 'length', marker: `ig_caption слишком короткий (${wordCount} слов, нужно 200-500)` });
+    }
+    if (wordCount > 500) {
+      violations.push({ kind: 'length', marker: `ig_caption слишком длинный (${wordCount} слов, нужно 200-500)` });
+    }
+    if (digitsCount < 2) {
+      violations.push({ kind: 'missing_element', marker: `мало цифр (${digitsCount}, нужно ≥2)` });
+    }
+    if (!yourAddressing) {
+      violations.push({ kind: 'missing_element', marker: 'нет перехода на «ты»' });
+    }
+    // Запрет эмодзи в основном тексте: ищем эмодзи ВНЕ строки хештегов.
+    // Эвристика: хештеги обычно в финале (последний абзац начинается с #).
+    const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+    const lastIsHashtags = lines.length > 0 && lines[lines.length - 1]!.startsWith('#');
+    const mainText = lastIsHashtags ? lines.slice(0, -1).join('\n') : text;
+    // Юникод-эмодзи (грубо: символы вне ASCII + базовой кириллицы + типографики).
+    const emojiRegex = /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}]/u;
+    if (emojiRegex.test(mainText)) {
+      const matched = mainText.match(emojiRegex);
+      violations.push({
+        kind: 'forbidden',
+        marker: `эмодзи в основном тексте caption запрещены (только в строке хештегов): "${matched?.[0] ?? '?'}"`,
+      });
     }
   }
 

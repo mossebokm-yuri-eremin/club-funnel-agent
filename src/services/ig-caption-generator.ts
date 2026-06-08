@@ -1,13 +1,17 @@
 // ig-caption-generator — генерит подпись для поста в Instagram через Sonnet 4.6.
 //
-// Вход: idea (summary + pain_tag + strategy) + codeWord + опц. bonusTitle.
-// Выход: caption 600–1200 символов с hook + телом + CTA "Пиши «CODEWORD» в Direct" + 5–7 хештегов.
+// ТЗ Юрия 2026-06-08: переключён с twin-ye.v2 на новый buildTwinYePrompt с
+// kind='ig_caption'. Это даёт:
+//   - запрет эмодзи в основном тексте (только в строке хештегов)
+//   - длина 200-400 слов через valid-v3
+//   - обязательно имя из real_stories + ≥4 характерных оборота
+//   - органичная интеграция code_word в финальный CTA
 //
-// Без MOSSEBO. Без конкретной цены клуба (sacred rule #11).
-// Голос — Юрий Еремин: первое лицо, тёплый, без штампов.
+// Без MOSSEBO. Без цены клуба (sacred rule #11).
 
+import type { Pool } from 'pg';
 import { callAnthropic } from '../integrations/anthropic.js';
-import { TWIN_YE_SYSTEM_PROMPT } from '../prompts/twin-ye.v2.js';
+import { buildTwinYePrompt } from '../prompts/twin-ye.js';
 import { log } from '../observability/logger.js';
 
 const STRATEGY_DESC: Record<'A' | 'B' | 'C', string> = {
@@ -17,6 +21,8 @@ const STRATEGY_DESC: Record<'A' | 'B' | 'C', string> = {
 };
 
 export interface IgCaptionInput {
+  /** Pool обязателен для buildTwinYePrompt (читает yury_voice_samples + voice-analysis). */
+  pool: Pool;
   ideaSummary: string;
   painTag: string;
   strategy: 'A' | 'B' | 'C';
@@ -40,47 +46,33 @@ export async function generateIgCaption(input: IgCaptionInput): Promise<IgCaptio
         ? `лонгрид «${input.bonusTitle}»`
         : 'материалы и приглашение в клуб';
 
-  const system = TWIN_YE_SYSTEM_PROMPT + '\n\n' + [
-    '═══════════════════════════════════════════════════════════════════════',
-    'ЗАДАЧА: подпись для Instagram (caption) под карусель',
-    '═══════════════════════════════════════════════════════════════════════',
-    'ДЛИНА: 600–1200 символов. Вписаться в IG-лимит, не растянуто.',
-    'СТРУКТУРА:',
-    '  1) Хук (2–3 строки, в стиле Юрия — без «дорогие подписчики», сразу в сюжет/цифру)',
-    '  2) Тело раскрывает идею (метафора + конкретный кейс/цифра)',
-    '  3) Переход через «Так вот.» / «Вот тогда —» / «Подождите.»',
-    '  4) Финальный мост к клубу через мягкий CTA — БЕЗ «Вступай в клуб»',
-    '  5) Хештеги в самом конце через пробел (5–7 релевантных тематике)',
-    '',
-    'CTA ОБЯЗАТЕЛЬНО органичный, через code_word в Direct (не «купи курс»):',
-    '  «Если хочешь разобрать <X> — напиши <CODE_WORD> в Direct. Пришлю.»',
-    '  (точная фраза с code_word в UPPERCASE)',
-    '',
-    'ХЕШТЕГИ: 5–7 релевантных (дизайн интерьеров, бизнес для дизайнеров).',
-    'НЕ общие типа #love, #life, #motivation.',
-    '',
-    'Эмодзи: 2–4 на весь пост максимум. Не по одному в каждой строке.',
-    '',
-    'Верни ТОЛЬКО подпись (без преамбулы, без «Вот подпись:»). Хештеги в конце через пробел.',
-  ].join('\n');
+  // Новый промпт: kind='ig_caption' → встроенные требования (длина 200+, ≥4 оборота,
+  // имя из real_stories, БЕЗ эмодзи в основном тексте, хештеги отдельной строкой).
+  const built = await buildTwinYePrompt(input.pool, {
+    ideaText: input.ideaSummary,
+    codeWord: input.codeWord,
+    kind: 'ig_caption',
+  });
 
   const userMsg = [
     `Тема карусели: ${input.ideaSummary}`,
     `Боль ЦА: ${input.painTag}`,
-    `Стратегия: ${STRATEGY_DESC[input.strategy]}`,
+    `Стратегия воронки: ${STRATEGY_DESC[input.strategy]}`,
     `Code_word для CTA (в UPPERCASE): ${codeUpper}`,
     `Куда ведём подписчика: ${ctaTarget}`,
     '',
-    'Напиши подпись.',
+    'Напиши caption по 7-блочной структуре (см. требования к ig_caption выше).',
+    'Code_word — ОБЯЗАТЕЛЬНО в финальном CTA Блока 6 органично.',
+    'Эмодзи — ТОЛЬКО в финальной строке хештегов (Блок 7), не в Блоках 1–6.',
   ].join('\n');
 
   const startedAt = Date.now();
   const r = await callAnthropic({
     mode: 'generative',
-    system,
+    system: built.systemPrompt,
     messages: [{ role: 'user', content: userMsg }],
     maxTokens: 1500,
-    temperature: 0.7,
+    temperature: 0.85,
     traceTag: 'ig-caption',
   });
 
@@ -89,8 +81,8 @@ export async function generateIgCaption(input: IgCaptionInput): Promise<IgCaptio
   const needsFallback = !caption.includes(codeUpper);
   const finalCaption = needsFallback
     ? caption +
-      '\n\n' +
-      `Пиши «${codeUpper}» в Direct — пришлю ${input.strategy === 'B' ? 'ссылку на канал клуба' : 'материалы'}.`
+      '\n\nЕсли хочешь разобрать — напиши ' + codeUpper + ' в Direct. Пришлю ' +
+      (input.strategy === 'B' ? 'ссылку на канал клуба «Реализация».' : 'материалы.')
     : caption;
 
   log.info(

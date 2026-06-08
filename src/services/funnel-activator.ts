@@ -122,10 +122,10 @@ export async function activateFunnelOnApprove(
   }
 
   // 3. code_word.
-  const codeWord = await generateUniqueCodeWord(
-    pool,
-    idea.pain_tag ? { painSeed: idea.pain_tag } : {},
-  );
+  const codeWord = await generateUniqueCodeWord(pool, {
+    ...(idea.pain_tag ? { painSeed: idea.pain_tag } : {}),
+    ...(idea.summary ? { ideaSummary: idea.summary } : {}),
+  });
   log.info({ ideaId: input.ideaId, codeWord, strategy: idea.strategy }, 'funnel-activator: code_word');
 
   // 4. INSERT funnels.

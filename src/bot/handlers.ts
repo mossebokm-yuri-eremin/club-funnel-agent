@@ -386,15 +386,16 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                   );
                   const ideaSelect = await opts.pool!.query<{
                     pain_tag: string | null;
+                    summary: string | null;
                   }>(
-                    `SELECT pain_tag FROM ideas WHERE id = $1`,
+                    `SELECT pain_tag, summary FROM ideas WHERE id = $1`,
                     [ideaIdForLog],
                   );
                   const painTag = ideaSelect.rows[0]?.pain_tag ?? '';
-                  const cw = await generateUniqueCodeWord(
-                    opts.pool!,
-                    painTag ? { painSeed: painTag } : {},
-                  );
+                  const cw = await generateUniqueCodeWord(opts.pool!, {
+                    ...(painTag ? { painSeed: painTag } : {}),
+                    ...(ideaSelect.rows[0]?.summary ? { ideaSummary: ideaSelect.rows[0].summary } : {}),
+                  });
                   const ins = await opts.pool!.query<{ id: string }>(
                     `INSERT INTO funnels (idea_id, code_word, strategy, status)
                        VALUES ($1, $2, COALESCE((SELECT strategy FROM ideas WHERE id = $1), 'B'), 'draft')
@@ -439,6 +440,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                   if (idea?.strategy && idea.summary) {
                     const { generateIgCaption } = await import('../services/ig-caption-generator.js');
                     const ig = await generateIgCaption({
+                      pool: opts.pool!,
                       ideaSummary: idea.summary,
                       painTag: idea.pain_tag ?? '',
                       strategy: idea.strategy,
@@ -462,21 +464,30 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
                   );
                 }
 
-                // Собираем URL'ы слайдов из content_packages.assets
+                // Собираем тексты слайдов из content_packages.carousel_slides
+                // (тексты ВСЕГДА должны быть; URL картинок — опционально из assets.slides).
                 let slideLinks = '';
                 let slideCount = 0;
                 try {
-                  const pkgAssetsRes = await opts.pool!.query<{
+                  const pkgRes = await opts.pool!.query<{
+                    carousel_slides: unknown;
                     assets: unknown;
-                  }>(`SELECT assets FROM content_packages WHERE id = $1`, [pkgId]);
-                  const assets = pkgAssetsRes.rows[0]?.assets;
+                  }>(`SELECT carousel_slides, assets FROM content_packages WHERE id = $1`, [pkgId]);
+                  const cs = pkgRes.rows[0]?.carousel_slides;
+                  if (Array.isArray(cs)) {
+                    slideCount = cs.length;
+                    // Текстовые превью слайдов (для копирования дизайнером)
+                    slideLinks = cs.map((s, i) => {
+                      const text = typeof s === 'string' ? s : (s as { text?: string })?.text ?? '';
+                      return `${i + 1}. ${text}`;
+                    }).join('\n');
+                  }
+                  // Если есть URL картинок — добавим их отдельной секцией ниже текстов
+                  const assets = pkgRes.rows[0]?.assets;
                   if (assets && typeof assets === 'object') {
                     const a = assets as { slides?: string[] };
-                    if (Array.isArray(a.slides)) {
-                      slideCount = a.slides.length;
-                      slideLinks = a.slides
-                        .map((u, i) => `${i + 1}. ${u}`)
-                        .join('\n');
+                    if (Array.isArray(a.slides) && a.slides.length > 0) {
+                      slideLinks += '\n\n🖼 Картинки:\n' + a.slides.map((u, i) => `${i + 1}. ${u}`).join('\n');
                     }
                   }
                 } catch { /* non-fatal */ }
