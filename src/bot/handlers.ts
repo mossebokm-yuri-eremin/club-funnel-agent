@@ -58,6 +58,22 @@ function isAuthorized(ctx: Context, allowedUserIds: number[]): boolean {
 }
 
 export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void {
+  // ---- Глобальный фильтр: бот реагирует ТОЛЬКО в private chats ----
+  // Никаких реакций в group/supergroup/channel — даже если бота туда добавили.
+  // Бот в чате клуба должен только сидеть тихо (для post-payment invite-флоу).
+  bot.use(async (ctx, next) => {
+    const chatType = ctx.chat?.type;
+    if (chatType && chatType !== 'private') {
+      // Не логируем каждое сообщение — это спам. Один раз помечаем на debug.
+      log.debug(
+        { chatId: ctx.chat?.id, chatType, from: ctx.from?.id },
+        'bot: ignoring non-private chat',
+      );
+      return; // молчим
+    }
+    await next();
+  });
+
   // ---- /start ----
   // Two режима:
   //   1. /start без параметра — это сам Юрий (greeting).
@@ -164,7 +180,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- /help ----
   bot.command('help', async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserIds)) {
-      log.warn({ from: ctx.from?.id }, 'unauthorized sender: /help');
+      log.warn({ from: ctx.from?.id, chatId: ctx.chat?.id, chatType: ctx.chat?.type }, 'unauthorized sender: /help');
       return;
     }
     await ctx.reply(HELP);
@@ -270,7 +286,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- /status ----
   bot.command('status', async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserIds)) {
-      log.warn({ from: ctx.from?.id }, 'unauthorized sender: /status');
+      log.warn({ from: ctx.from?.id, chatId: ctx.chat?.id, chatType: ctx.chat?.type }, 'unauthorized sender: /status');
       return;
     }
     if (!opts.statusProvider) {
@@ -294,7 +310,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // Кнопки в approval-notifier: cp:approve|regen|edit|reject:<UUID>
   bot.callbackQuery(/^cp:(approve|regen|edit|reject):([0-9a-f-]{36})$/, async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserIds)) {
-      log.warn({ from: ctx.from?.id }, 'unauthorized callback');
+      log.warn({ from: ctx.from?.id, chatId: ctx.chat?.id, chatType: ctx.chat?.type }, 'unauthorized callback');
       await ctx.answerCallbackQuery({ text: 'Нет доступа.' });
       return;
     }
@@ -987,7 +1003,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- voice / audio ----
   bot.on(['message:voice', 'message:audio'], async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserIds)) {
-      log.warn({ from: ctx.from?.id }, 'unauthorized sender: voice/audio');
+      log.warn({ from: ctx.from?.id, chatId: ctx.chat?.id, chatType: ctx.chat?.type }, 'unauthorized sender: voice/audio');
       return;
     }
     const m = ctx.message!;
@@ -1021,7 +1037,7 @@ export function registerHandlers(bot: Bot, opts: RegisterHandlersOptions): void 
   // ---- text / reference forward ----
   bot.on('message', async (ctx) => {
     if (!isAuthorized(ctx, opts.allowedUserIds)) {
-      log.warn({ from: ctx.from?.id }, 'unauthorized sender: message');
+      log.warn({ from: ctx.from?.id, chatId: ctx.chat?.id, chatType: ctx.chat?.type }, 'unauthorized sender: message');
       return;
     }
     const m = ctx.message;
