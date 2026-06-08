@@ -163,13 +163,27 @@ export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhook
     const initialParseStatus = bodySecretStatus === 'bad' ? 'error' : 'pending';
     const initialParseError = bodySecretStatus === 'bad' ? 'GC webhook secret mismatch' : null;
 
+    // 4.6) Извлекаем UTM в отдельные колонки (для быстрой фильтрации + индекса).
+    // Источник: query_params (для GET) или body_parsed (для POST).
+    function pickStr(src: unknown, key: string): string | null {
+      if (src && typeof src === 'object') {
+        const v = (src as Record<string, unknown>)[key];
+        if (typeof v === 'string' && v.trim().length > 0) return v.trim();
+      }
+      return null;
+    }
+    const utmSource = pickStr(bodyParsed, 'utm_source') ?? pickStr(queryParams, 'utm_source');
+    const utmCampaign = pickStr(bodyParsed, 'utm_campaign') ?? pickStr(queryParams, 'utm_campaign');
+    const utmContent = pickStr(bodyParsed, 'utm_content') ?? pickStr(queryParams, 'utm_content');
+
     // 5) INSERT raw event.
     try {
       const r = await opts.pool.query<{ id: string }>(
         `INSERT INTO getcourse_raw_events
             (request_method, request_path, query_params, body_raw, body_parsed,
-             raw_payload, headers, ip_address, user_agent, hmac_valid, content_type, parse_status, parse_error)
-          VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13)
+             raw_payload, headers, ip_address, user_agent, hmac_valid, content_type, parse_status, parse_error,
+             utm_source, utm_campaign, utm_content)
+          VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16)
           RETURNING id`,
         [
           method,
@@ -186,6 +200,9 @@ export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhook
           contentType,
           initialParseStatus,
           initialParseError,
+          utmSource,
+          utmCampaign,
+          utmContent,
         ],
       );
       log.info(
