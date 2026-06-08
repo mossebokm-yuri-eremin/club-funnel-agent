@@ -135,13 +135,41 @@ export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhook
       }
     }
 
+    // 4.5) ТЗ 2026-06-08: опциональный secret-check в body (form-urlencoded).
+    // GC UI не поддерживает HMAC headers, но шлёт `secret` как обычное поле формы.
+    // Если поле есть И env GC_WEBHOOK_SECRET выставлен И НЕ совпадает —
+    // отказываем (но всё равно INSERT-им запись для аудита). Если поля нет
+    // или env пустой → backward-compat (текущее поведение, всё пускаем).
+    let bodySecretStatus: 'absent' | 'ok' | 'bad' = 'absent';
+    if (opts.secret && bodyParsed && typeof bodyParsed === 'object') {
+      const bodySecret = (bodyParsed as Record<string, unknown>)['secret'];
+      if (typeof bodySecret === 'string' && bodySecret.length > 0) {
+        const aBuf = Buffer.from(bodySecret);
+        const bBuf = Buffer.from(opts.secret);
+        if (aBuf.length === bBuf.length) {
+          try {
+            bodySecretStatus = crypto.timingSafeEqual(aBuf, bBuf) ? 'ok' : 'bad';
+          } catch {
+            bodySecretStatus = 'bad';
+          }
+        } else {
+          bodySecretStatus = 'bad';
+        }
+      }
+    }
+
+    // Если secret пришёл и не совпал — INSERT с parse_status='bad_secret',
+    // НЕ форвардим в parser. GC всё равно получит 200 OK.
+    const initialParseStatus = bodySecretStatus === 'bad' ? 'error' : 'pending';
+    const initialParseError = bodySecretStatus === 'bad' ? 'GC webhook secret mismatch' : null;
+
     // 5) INSERT raw event.
     try {
       const r = await opts.pool.query<{ id: string }>(
         `INSERT INTO getcourse_raw_events
             (request_method, request_path, query_params, body_raw, body_parsed,
-             raw_payload, headers, ip_address, user_agent, hmac_valid, content_type, parse_status)
-          VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, 'pending')
+             raw_payload, headers, ip_address, user_agent, hmac_valid, content_type, parse_status, parse_error)
+          VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13)
           RETURNING id`,
         [
           method,
@@ -156,6 +184,8 @@ export const getCourseWebhookPlugin: FastifyPluginAsync<RegisterGetCourseWebhook
           userAgent,
           hmacValid,
           contentType,
+          initialParseStatus,
+          initialParseError,
         ],
       );
       log.info(

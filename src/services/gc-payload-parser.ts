@@ -32,16 +32,88 @@ export function rublesToKopecks(v: unknown): number {
  * Эвристика суммы: если число большое (>= 10000) и без дробной части —
  * предполагаем что уже копейки (GC иногда шлёт `cost_money` так).
  * Иначе считаем рублями и умножаем на 100.
+ *
+ * ТЗ Юрия 2026-06-08 (наследие ye-ambassador-bot):
+ * GC шлёт payed_money в человеческом формате — может быть "5 000 руб.",
+ * "5000,50 руб", "1 234,56₽", "RUB 750", число. Включает nbsp (U+00A0)
+ * и тонкие пробелы (U+2009). Все эти варианты конвертируем в копейки.
  */
 export function smartAmountToKopecks(v: unknown): number {
   if (v === undefined || v === null || v === '') return 0;
-  const str = typeof v === 'string' ? v.trim() : String(v);
-  const hasFraction = /[.,]\d/.test(str);
-  const n = typeof v === 'number' ? v : Number(str.replace(',', '.'));
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v)) return 0;
+    // Если число большое целое — возможно уже копейки
+    if (v >= 10000 && Number.isInteger(v)) return Math.round(v);
+    return Math.round(v * 100);
+  }
+  if (typeof v !== 'string') return 0;
+  const raw = v.trim();
+  if (!raw) return 0;
+  // Защитное очищение: убираем словесные единицы валюты, символы валюты, все виды пробелов.
+  const cleaned = raw
+    .replace(/[A-Za-zА-Яа-яёЁ.]+\s*$/u, '') // хвостовая буквенная единица "руб.", "rub", "₽"
+    .replace(/[A-Za-zА-Яа-яёЁ]/gu, '') // оставшиеся буквы внутри
+    .replace(/[\u00A0\u2009 ₽$€]/g, '') // nbsp + thin space + обычный space + валюта
+    .replace(',', '.');
+  if (!cleaned) return 0;
+  const n = Number(cleaned);
   if (!Number.isFinite(n)) return 0;
-  // С точкой = рубли (5000.00) → ×100. Целое >=10000 = подозрительно много для RUB → возможно копейки.
+  const hasFraction = /[.]/.test(cleaned);
+  // С дробью = рубли → ×100. Целое >=10000 = подозрительно много для RUB → возможно копейки.
   if (!hasFraction && n >= 10000 && Number.isInteger(n)) return Math.round(n);
   return Math.round(n * 100);
+}
+
+/**
+ * Парсер дат от GetCourse. Возвращает ISO UTC.
+ *
+ * Поддерживаемые форматы:
+ *   - "2026-06-08T15:04:23Z" / "2026-06-08T15:04:23+00:00"  → ISO
+ *   - "2026-06-08 15:04:23"                                  → SQL МСК (UTC+3)
+ *   - "08.06.2026 14:46"                                     → русский МСК, без секунд
+ *   - "08.06.2026  14:46"                                    → двойной пробел
+ *   - "08.06.2026"                                           → только дата, начало суток МСК
+ *   - "" / null / "0000-00-00 00:00:00"                      → null (переменная не подставилась)
+ *
+ * При невалидном вводе → null (вызывающий код решает: now() или ошибка).
+ */
+export function parseGcDate(input: unknown): string | null {
+  if (input === undefined || input === null) return null;
+  const s = String(input).trim().replace(/\s+/g, ' ');
+  if (!s || s.startsWith('0000-00-00') || s === '0000-00-00 00:00:00') return null;
+
+  // URL-кодированный плюс TZ: "2026-05-23T11:58:13 00:00" → "+00:00"
+  // Проверяем ДО общего ISO потому что пробел в TZ ломает new Date(...).
+  const isoTzFixed = s.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) (\d{2}:\d{2})$/);
+  if (isoTzFixed) {
+    const d = new Date(`${isoTzFixed[1]}+${isoTzFixed[2]}`);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  // ISO с TZ
+  if (/T\d{2}:\d{2}/.test(s)) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  // SQL формат МСК (UTC+3): "YYYY-MM-DD HH:MM[:SS]"
+  const sql = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (sql) {
+    const [, y, mo, d, h, mi, sec] = sql;
+    return new Date(Date.UTC(+y!, +mo! - 1, +d!, +h! - 3, +mi!, +(sec ?? 0))).toISOString();
+  }
+  // Русский МСК: "DD.MM.YYYY HH:MM[:SS]"
+  const ru = s.match(/^(\d{2})\.(\d{2})\.(\d{4})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (ru) {
+    const [, d, mo, y, h, mi, sec] = ru;
+    return new Date(Date.UTC(+y!, +mo! - 1, +d!, +h! - 3, +mi!, +(sec ?? 0))).toISOString();
+  }
+  // Только дата "DD.MM.YYYY" → начало суток МСК
+  const ruDate = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (ruDate) {
+    const [, d, mo, y] = ruDate;
+    return new Date(Date.UTC(+y!, +mo! - 1, +d!, -3, 0, 0)).toISOString();
+  }
+  // Не распарсили — лучше null чем мусор
+  return null;
 }
 
 function pickString(obj: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -167,14 +239,13 @@ export function parseGcPayload(raw: unknown): GcParsedPayment {
     'RUB';
 
   const paidAtRaw =
-    pickString(obj, ['payment_paid_at', 'paid_at', 'payment_date']) ??
-    pickString(deal, ['paid_at']) ??
+    pickString(obj, ['payment_paid_at', 'paid_at', 'payment_date', 'payed_at', 'deal_payed_at']) ??
+    pickString(deal, ['paid_at', 'payed_at']) ??
     null;
-  // URL-кодированный '+' в timestamp (часовой пояс) превращается в пробел —
-  // нормализуем «2026-05-23T11:58:13 00:00» → «2026-05-23T11:58:13+00:00».
-  const paidAt = paidAtRaw && /T\d{2}:\d{2}:\d{2} \d{2}:\d{2}$/.test(paidAtRaw)
-    ? paidAtRaw.replace(/ (\d{2}:\d{2})$/, '+$1')
-    : paidAtRaw;
+  // ТЗ 2026-06-08: paid_at может быть в любом из 6 форматов (ISO/SQL/русский с/без секунд/пробелов).
+  // parseGcDate возвращает ISO UTC или null при невалидном вводе.
+  // Fallback на raw value сохраняем для backward-compat если parseGcDate не справился.
+  const paidAt = parseGcDate(paidAtRaw) ?? paidAtRaw;
 
   const userId =
     pickString(obj, ['user_id', 'gc_user_id', 'customer_id']) ??
