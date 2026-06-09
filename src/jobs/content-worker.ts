@@ -323,7 +323,9 @@ ${r.full_text}`,
       painTag: idea.pain_tag,
       strategy: decision.strategy,
       bonusTitle,
-      codeWord: decision.strategy === 'B' ? null : codeWord,
+      // ТЗ Юрия 2026-06-08: code_word нужен В ТЕКСТАХ для ВСЕХ стратегий
+      // (включая B — там тоже лиды пишут в Direct). Раньше для B передавался null.
+      codeWord,
       style,
       kbExcerpts,
       winningPatternsText,

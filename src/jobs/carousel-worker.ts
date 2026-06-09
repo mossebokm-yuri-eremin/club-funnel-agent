@@ -58,40 +58,52 @@ async function process(
   if (!content_package_id) {
     return { status: 'skipped', contentPackageId: '', reason: 'no content_package_id' };
   }
+  let renderRes: Awaited<ReturnType<typeof renderCarousel>> | null = null;
+  let renderErr: Error | null = null;
+
   try {
-    const res = await renderCarousel(
+    renderRes = await renderCarousel(
       { contentPackageId: content_package_id },
       { pool: deps.pool },
     );
-
-    // SPEC §2.8 AC-22 (упрощённо): после рендера каруселей шлём готовый
-    // пакет Юрию в Telegram. Без этого Юрий не узнаёт что контент готов.
-    try {
-      await notifyApprovalReady(
-        { contentPackageId: res.contentPackageId },
-        { pool: deps.pool },
-      );
-    } catch (err) {
-      log.warn(
-        { contentPackageId: res.contentPackageId, err: (err as Error).message },
-        'carousel-worker: notifyApprovalReady failed (non-fatal)',
-      );
-    }
-
-    return {
-      status: 'ok',
-      contentPackageId: res.contentPackageId,
-      slidesRendered: res.slides.length,
-      totalDurationMs: res.totalDurationMs,
-    };
   } catch (err) {
+    renderErr = err as Error;
     log.error(
-      { contentPackageId: content_package_id, err: (err as Error).message },
-      'carousel-worker: render failed',
+      { contentPackageId: content_package_id, err: renderErr.message },
+      'carousel-worker: render failed (insufficient balance / API error — текстовый пакет всё равно отправим)',
     );
-    // Не throw — иначе jobs будут зацикливаться в очереди при стабильной ошибке.
-    // Логи покажут проблему, BullMQ всё равно сделает retry по defaultJobOptions.
-    // Пока возвращаем ошибочный результат — на следующей итерации поправим логику.
-    throw err;
   }
+
+  // ТЗ Юрия 2026-06-09: ВСЕГДА вызываем notifyApprovalReady, даже если render
+  // упал (например, GPTunnel баланс = 0). Тексты пакета и slides уже в БД,
+  // brief.md рендерится в approve-callback. Юрий получит пакет и сделает
+  // карусель вручную через Claude Design.
+  try {
+    await notifyApprovalReady(
+      { contentPackageId: content_package_id },
+      { pool: deps.pool },
+    );
+  } catch (err) {
+    log.warn(
+      { contentPackageId: content_package_id, err: (err as Error).message },
+      'carousel-worker: notifyApprovalReady failed (non-fatal)',
+    );
+  }
+
+  // Если рендер упал — НЕ throw (иначе бесконечный retry в BullMQ).
+  // Возвращаем error-статус, BullMQ счистит job по defaultJobOptions.
+  if (renderErr) {
+    return {
+      status: 'error',
+      contentPackageId: content_package_id,
+      reason: renderErr.message.slice(0, 200),
+    };
+  }
+
+  return {
+    status: 'ok',
+    contentPackageId: renderRes!.contentPackageId,
+    slidesRendered: renderRes!.slides.length,
+    totalDurationMs: renderRes!.totalDurationMs,
+  };
 }
